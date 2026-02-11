@@ -220,12 +220,12 @@ python main.py \
 
 本项目采用 MIT 许可证。详见 LICENSE 文件。
 
-## 📞 联系信息
+## 📞 联系与反馈
 
-如有问题或建议，请通过以下方式联系：
+如有问题或建议，请通过 GitHub Issues 与我们联系：
 
-- **GitHub**：[Oas7pOo/AiProofAgent](https://github.com/Oas7pOo/AiProofAgent)
-- **电子邮件**：1094394025@qq.com
+- **GitHub Issues**：[提交问题或建议](https://github.com/Oas7pOo/AiProofAgent/issues)
+- **项目地址**：[Oas7pOo/AiProofAgent](https://github.com/Oas7pOo/AiProofAgent)
 
 ---
 
