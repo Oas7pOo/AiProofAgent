@@ -1,10 +1,10 @@
 # gui_app.py
 import tkinter as tk
 from tkinter import ttk
-from ui.tab_preprocess import PreprocessTab
-from ui.tab_proof import RunTab
-from ui.tab_proof2 import Proof2Tab     # <<< 新增
-from ui.tab_settings import SettingsTab
+from .tab_preprocess import PreprocessTab
+from .tab_proof import RunTab
+from .tab_proof2 import Proof2Tab     # <<< 新增
+from .tab_settings import SettingsTab
 
 class ProofreadGUI(tk.Tk):
     def __init__(self):

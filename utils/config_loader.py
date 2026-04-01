@@ -3,7 +3,7 @@ import yaml
 
 def load_config(config_path="config.yaml"):
     """
-    只负责老实读取 config.yaml，绝不自作聪明添加默认值。
+    读取 config.yaml。
     """
     target_path = config_path
     
@@ -17,7 +17,8 @@ def load_config(config_path="config.yaml"):
 
     try:
         with open(target_path, 'r', encoding='utf-8') as f:
-            return yaml.safe_load(f) or {}
+            config = yaml.safe_load(f) or {}
+        return config
     except Exception as e:
         print(f"[WARN] Config load failed: {e}")
         return {}

@@ -2,12 +2,12 @@
 import os
 import threading
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox, scrolledtext
 
-from utils.config_loader import load_config
-from ai.alignment_service import AlignmentService  # 复用 align_batch 的请求/解析方式 :contentReference[oaicite:8]{index=8}
-from tools.export_manager import ExportManager
-from tools.proofread2_service import Proofread2Project, find_latest_proof2_archive
+from ..utils.config_loader import load_config
+from ..ai.alignment_service import AlignmentService  # 复用 align_batch 的请求/解析方式 :contentReference[oaicite:8]{index=8}
+from ..tools.export_manager import ExportManager
+from ..tools.proofread2_service import Proofread2Project, find_latest_proof2_archive
 
 
 DEFAULT_DIR_NAME = "archives"
@@ -103,6 +103,9 @@ class Proof2Tab(ttk.Frame):
         self.btn_auto = ttk.Button(btns, text="自动校对", command=self.on_auto)
         self.btn_auto.pack(side="left", padx=4)
 
+        self.btn_batch = ttk.Button(btns, text="批量校对", command=self.on_batch)
+        self.btn_batch.pack(side="left", padx=4)
+
         self.btn_export_json = ttk.Button(btns, text="导出JSON", command=self.on_export_json)
         self.btn_export_json.pack(side="left", padx=16)
 
@@ -125,7 +128,7 @@ class Proof2Tab(ttk.Frame):
         self.btn_copy = ttk.Button(left_top, text="复制Prompt", command=self.on_copy_prompt)
         self.btn_copy.pack(side="right", padx=4)
 
-        self.txt_prompt = tk.scrolledtext.ScrolledText(left, height=20, wrap="word")
+        self.txt_prompt = scrolledtext.ScrolledText(left, height=20, wrap="word")
         self.txt_prompt.pack(fill="both", expand=True, padx=4, pady=4)
         self._set_text_readonly(self.txt_prompt, True)
 
@@ -137,7 +140,7 @@ class Proof2Tab(ttk.Frame):
         self.btn_apply = ttk.Button(right_top, text="应用", command=self.on_apply)
         self.btn_apply.pack(side="right", padx=4)
 
-        self.txt_resp = tk.scrolledtext.ScrolledText(right, height=20, wrap="word")
+        self.txt_resp = scrolledtext.ScrolledText(right, height=20, wrap="word")
         self.txt_resp.pack(fill="both", expand=True, padx=4, pady=4)
 
         paned.add(left, weight=1)
@@ -173,6 +176,7 @@ class Proof2Tab(ttk.Frame):
     def _set_ui_ready(self, ready: bool):
         state = "normal" if ready else "disabled"
         self.btn_auto.config(state=state)
+        self.btn_batch.config(state=state)
         self.btn_apply.config(state=state)
         self.btn_copy.config(state=state)
 
@@ -257,8 +261,8 @@ class Proof2Tab(ttk.Frame):
         if not self.project:
             return
 
-        max_blocks = int(self.cfg.get("max_blocks"))
-        max_chars = int(self.cfg.get("max_chars"))
+        max_blocks = int(self.cfg.get("max_blocks", 5))
+        max_chars = int(self.cfg.get("max_chars", 6000))
 
         self.batch_queue = self.project.build_batches(max_blocks=max_blocks, max_chars=max_chars)
 
@@ -309,6 +313,53 @@ class Proof2Tab(ttk.Frame):
         self.btn_start.config(state="disabled")
 
         t = threading.Thread(target=self._auto_loop, daemon=True)
+        t.start()
+
+    def on_batch(self):
+        if not self.project or not self.batch_queue:
+            messagebox.showwarning("提示", "请先点击“开始校对”加载项目。")
+            return
+
+        # 获取配置中的并发数
+        max_workers = self.cfg.get("ai_max_workers", 1)
+        if not isinstance(max_workers, int) or max_workers <= 0:
+            max_workers = 1
+
+        # 禁用按钮，避免重复点击
+        self.btn_batch.config(state="disabled")
+        self.btn_start.config(state="disabled")
+        self.btn_auto.config(state="disabled")
+
+        # 在后台线程中执行批量校对
+        def batch_task():
+            try:
+                total_batches = len(self.batch_queue)
+                self.status_var.set(f"开始批量校对，并发数: {max_workers}，总批次: {total_batches}")
+                
+                # 定义进度更新回调
+                def update_progress(processed, total):
+                    self.after(0, lambda: self.status_var.set(f"批量校对中: {processed}/{total} 批次"))
+                
+                # 调用 Proofread2Project 的 run_batches_threaded 方法
+                self.project.run_batches_threaded(
+                    self.srv,
+                    self.archive_path,
+                    max_workers=max_workers,
+                    progress_callback=update_progress
+                )
+                # 校对完成后更新 UI
+                self.after(0, lambda: self.status_var.set("批量校对完成"))
+                self.after(0, lambda: self._rebuild_batches_and_show_first())
+            except Exception as e:
+                self.after(0, lambda: messagebox.showerror("批量校对异常", str(e)))
+                self.after(0, lambda: self.status_var.set(f"批量校对失败: {str(e)}"))
+            finally:
+                # 恢复按钮状态
+                self.after(0, lambda: self.btn_batch.config(state="normal"))
+                self.after(0, lambda: self.btn_start.config(state="normal"))
+                self.after(0, lambda: self.btn_auto.config(state="normal"))
+
+        t = threading.Thread(target=batch_task, daemon=True)
         t.start()
 
     def _auto_loop(self):

@@ -43,8 +43,7 @@ class ExportManager:
           export_final=True  -> 导出 final json
           export_md=True     -> 导出 md
           export_terms=True  -> 导出 new_terms json
-
-        向后兼容：不传参时默认全导出（旧行为）。
+        不传参时默认全导出。
         """
         if not (export_final or export_md or export_terms):
             raise ValueError("未选择任何导出类型")
@@ -98,7 +97,7 @@ class ExportManager:
 
     def _export_markdown(self, items, title, path):
         """
-        生成人类可读报告。
+        生成可读报告。
         逻辑优化：以原文层级为准，强制清洗译文中的 # 号，防止重复。
         """
         header_pat = re.compile(r"^(#{1,6})\s+(.*)", re.DOTALL)

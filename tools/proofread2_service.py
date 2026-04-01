@@ -370,7 +370,7 @@ class Proofread2Project:
             )
 
         return (
-            "你是中文 D&D 译文二校员。你熟悉dnd的中文翻译与术语，基于当前翻译稿件与并不熟悉dnd的一校译文/建议做最终二校，确保术语一致、语义准确、中文自然。\n"
+            "你是中文 D&D 译文二校员。你熟悉dnd的中文翻译与术语，基于当前翻译稿件与质量不好的一校给出的译文与建议做最终二校，确保术语一致、语义准确、中文自然。\n"
             "\n"
             "【术语约束】\n"
             "1) 旧术语表为最高优先级（若旧术语命中，必须使用旧术语的译名）。\n"
@@ -388,7 +388,7 @@ class Proofread2Project:
             "【输出要求】\n"
             "必须输出一个纯 JSON 列表，不要包含 Markdown。\n"
             "每个对象必须包含：BLOCK_ID / proofread_zh / proofread_note。\n"
-            "proofread_zh 必须给出“最终二校译文”（即使与一校相同也要完整输出）。\n"
+            "proofread_zh 必须给出“最终二校译文”（即使与一校相同也要完整输出），如果分段奇怪则可以合并到前一段译文，此处留空。\n"
             "proofread_note 写修改原因及文中出现的术语；可以留空字符串。\n"
             "\n"
             "[\n"
@@ -413,8 +413,6 @@ class Proofread2Project:
 
             if bid in needed:
                 zh = str(obj.get("proofread_zh", "")).strip()
-                if not zh:
-                    return False, f"{bid}: proofread_zh 为空。"
                 if zh == "[BLOCK_ERROR]":
                     return False, f"{bid}: 返回了 [BLOCK_ERROR]，按规则需要停下等待人工修正。"
 
@@ -457,6 +455,7 @@ class Proofread2Project:
         max_blocks: Optional[int] = None,
         max_chars: Optional[int] = None,
         time_wait: Optional[int] = None,
+        progress_callback=None,
     ) -> None:
         """
         通用 StageRunner 执行入口（默认可单线程；多线程时注意请求端并发限制）。
@@ -490,6 +489,7 @@ class Proofread2Project:
         processed = 0
         consecutive_failures = 0
         MAX_FAILURES = 5
+        total_batches = len(batches)
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_idx = {executor.submit(_worker, b): i for i, b in enumerate(batches)}
@@ -500,6 +500,9 @@ class Proofread2Project:
                     spec.apply(batches[idx], parsed)
                     processed += 1
                     consecutive_failures = 0
+                    # 调用进度回调
+                    if progress_callback:
+                        progress_callback(processed, total_batches)
                 except Exception as e:
                     consecutive_failures += 1
                     print(f"[WARN] Batch {idx+1}/{len(batches)} failed: {e}")
