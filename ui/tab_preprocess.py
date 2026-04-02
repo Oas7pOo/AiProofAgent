@@ -216,9 +216,6 @@ class PreprocessTab(ttk.Frame):
                 else:
                     with open(p_out, 'w', encoding='utf-8', newline='') as f:
                         writer = csv.writer(f)
-                        writer.writerow(["#正式使用时请删除前三行。Please remove the first 3 lines in production."])
-                        writer.writerow(["#键值", "原文", "译文", "上下文（可选）"])
-                        writer.writerow(["#Key", "Source", "Translation", "Context(optional)"])
                         for b in blocks:
                             writer.writerow([b.key, b.en_block, "", ""])
                 
@@ -271,9 +268,6 @@ class PreprocessTab(ttk.Frame):
                         data = json.load(f)
                     with open(f_out, 'w', encoding='utf-8', newline='') as f:
                         writer = csv.writer(f)
-                        writer.writerow(["#正式使用时请删除前三行。Please remove the first 3 lines in production."])
-                        writer.writerow(["#键值", "原文", "译文", "上下文（可选）"])
-                        writer.writerow(["#Key", "Source", "Translation", "Context(optional)"])
                         count = 0
                         for item in data:
                             # 兼容内部模型(en_block/proofread_zh)和Paratranz模型(original/translation)

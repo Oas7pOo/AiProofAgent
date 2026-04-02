@@ -3,6 +3,7 @@ import requests
 import logging
 import re
 import os
+import io
 from typing import List
 
 from utils.config import ConfigManager
@@ -10,11 +11,19 @@ from models.document import TranslationBlock
 
 logger = logging.getLogger("AiProofAgent.OCREngine")
 
+try:
+    from PyPDF2 import PdfReader, PdfWriter
+    PYPDF2_AVAILABLE = True
+except ImportError:
+    PYPDF2_AVAILABLE = False
+    logger.warning("PyPDF2 not available, PDF splitting will not work")
+
 class PaddleOCREngine:
     def __init__(self, config_path="config.yaml"):
         cfg = ConfigManager(config_path)
         self.api_url = cfg.get("ocr.api_url", "https://ych83fn6yaveg1y3.aistudio-app.com/layout-parsing")
         self.token = cfg.get("ocr.token", "52621de9cc8d22bd45e1cce14789b107191bebca")
+        self.max_batch_pages = cfg.get("ocr.max_batch_pages", 90)
         self.headers = {
             "Authorization": f"token {self.token}",
             "Content-Type": "application/json"
@@ -23,20 +32,95 @@ class PaddleOCREngine:
     def process_pdf(self, file_path: str) -> List[TranslationBlock]:
         """
         处理 PDF 文件并返回分段好的 TranslationBlock 列表。
+        使用分批处理策略：先尝试处理 max_batch_pages 页，如果失败则减少页数重试。
         """
         logger.info(f"开始使用 PaddleOCR-VL-1.5 处理 PDF: {file_path}")
         
-        with open(file_path, "rb") as file:
-            file_bytes = file.read()
-            file_data = base64.b64encode(file_bytes).decode("ascii")
-
+        if not PYPDF2_AVAILABLE:
+            logger.error("PyPDF2 not installed, cannot process PDF in batches")
+            raise ImportError("PyPDF2 is required for PDF batch processing. Install with: pip install PyPDF2")
+        
+        # 读取 PDF 获取总页数
+        reader = PdfReader(file_path)
+        total_pages = len(reader.pages)
+        logger.info(f"PDF 总页数: {total_pages}")
+        
         # 提取去除了数字的文档名，作为段落 Key 的前缀
         doc_name = os.path.basename(file_path).split('.')[0]
         doc_name = re.sub(r'\d+', '', doc_name).strip(' _-')
         if not doc_name: doc_name = "doc"
-
-        # 根据配置.md要求的参数严格设定
-        # 注意：服务端已开启 max_num_input_imgs: null 取消页数限制，此处直接全量上传
+        
+        all_blocks = []
+        current_page = 0
+        page_offset = 0  # 用于调整页码
+        
+        while current_page < total_pages:
+            # 计算本次要处理的页面范围
+            remaining_pages = total_pages - current_page
+            batch_size = min(self.max_batch_pages, remaining_pages)
+            
+            # 尝试处理当前批次
+            success = False
+            current_batch_size = batch_size
+            max_retries = 3
+            
+            while current_batch_size >= 10 and not success:
+                end_page = min(current_page + current_batch_size, total_pages)
+                logger.info(f"尝试处理第 {current_page + 1} 到 {end_page} 页 (共 {current_batch_size} 页)")
+                
+                # 提取当前批次的页面
+                pdf_bytes = self._extract_pages(file_path, current_page, end_page)
+                
+                # 尝试解析
+                for attempt in range(max_retries):
+                    try:
+                        blocks = self._process_pdf_batch(pdf_bytes, current_page, end_page, doc_name, page_offset)
+                        if blocks:
+                            all_blocks.extend(blocks)
+                            success = True
+                            page_offset += (end_page - current_page)
+                            current_page = end_page
+                            logger.info(f"成功处理第 {current_page - (end_page - current_page) + 1} 到 {end_page} 页，提取 {len(blocks)} 个块")
+                            break
+                    except Exception as e:
+                        logger.warning(f"第 {attempt + 1} 次尝试失败: {e}")
+                        if attempt == max_retries - 1:
+                            logger.error(f"处理第 {current_page + 1} 到 {end_page} 页失败，将减少页数重试")
+                
+                if not success:
+                    # 减少页数重试
+                    current_batch_size -= 10
+                    if current_batch_size < 10:
+                        logger.error(f"无法处理第 {current_page + 1} 页及之后的页面，即使减少到 10 页也失败")
+                        raise Exception(f"PDF 处理失败：第 {current_page + 1} 页无法解析")
+            
+            if not success:
+                logger.error(f"无法处理第 {current_page + 1} 页及之后的页面")
+                raise Exception(f"PDF 处理失败：无法解析第 {current_page + 1} 页及之后的页面")
+        
+        logger.info(f"PDF 处理完成，共解析 {total_pages} 页，提取 {len(all_blocks)} 个段落/表格块。")
+        return all_blocks
+    
+    def _extract_pages(self, file_path: str, start_page: int, end_page: int) -> bytes:
+        """提取 PDF 的指定页面范围，返回字节数据"""
+        reader = PdfReader(file_path)
+        writer = PdfWriter()
+        
+        for i in range(start_page, end_page):
+            if i < len(reader.pages):
+                writer.add_page(reader.pages[i])
+        
+        # 写入内存缓冲区
+        output_buffer = io.BytesIO()
+        writer.write(output_buffer)
+        output_buffer.seek(0)
+        
+        return output_buffer.read()
+    
+    def _process_pdf_batch(self, pdf_bytes: bytes, start_page: int, end_page: int, doc_name: str, page_offset: int) -> List[TranslationBlock]:
+        """处理一批 PDF 页面"""
+        file_data = base64.b64encode(pdf_bytes).decode("ascii")
+        
         payload = {
             "file": file_data,
             "fileType": 0,                    # 0表示PDF文件
@@ -51,32 +135,25 @@ class PaddleOCREngine:
             "prettifyMarkdown": True,         # Markdown美化
             "visualize": False                # 不返回图像，减少返回时间
         }
-
-        try:
-            response = requests.post(self.api_url, json=payload, headers=self.headers)
-            response.raise_for_status()
-            
-            result = response.json().get("result", {})
-            layout_results = result.get("layoutParsingResults", [])
-            
-            all_blocks = []
-            for i, res in enumerate(layout_results):
-                page_num = i + 1
-                markdown_data = res.get("markdown", {})
-                text = markdown_data.get("text", "")
-                
-                # 解析Markdown文本为按“页码_段落序号”对应的结构块
-                page_blocks = self._parse_markdown_to_blocks(text, page_num, doc_name)
-                all_blocks.extend(page_blocks)
-            
-            logger.info(f"PDF 处理完成，共解析 {len(layout_results)} 页，提取 {len(all_blocks)} 个段落/表格块。")
-            return all_blocks
         
-        except requests.exceptions.RequestException as e:
-            logger.error(f"PaddleOCR 请求失败: {e}")
-            if hasattr(e, 'response') and e.response is not None:
-                logger.error(f"响应内容: {e.response.text}")
-            raise e
+        response = requests.post(self.api_url, json=payload, headers=self.headers)
+        response.raise_for_status()
+        
+        result = response.json().get("result", {})
+        layout_results = result.get("layoutParsingResults", [])
+        
+        all_blocks = []
+        for i, res in enumerate(layout_results):
+            # 计算实际页码（加上偏移量）
+            actual_page_num = page_offset + i + 1
+            markdown_data = res.get("markdown", {})
+            text = markdown_data.get("text", "")
+            
+            # 解析Markdown文本为按"页码_段落序号"对应的结构块
+            page_blocks = self._parse_markdown_to_blocks(text, actual_page_num, doc_name)
+            all_blocks.extend(page_blocks)
+        
+        return all_blocks
 
     def _parse_markdown_to_blocks(self, text: str, page_num: int, doc_name: str) -> List[TranslationBlock]:
         """

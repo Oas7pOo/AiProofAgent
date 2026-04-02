@@ -98,12 +98,12 @@ class RunTab(ttk.Frame):
         self.export_actions_fr = ttk.LabelFrame(self, text="导出（任务完成后可用）")
         self.btn_export_para_json = ttk.Button(self.export_actions_fr, text="导出Paratranz JSON", command=self.export_para_json)
         self.btn_export_para_csv = ttk.Button(self.export_actions_fr, text="导出Paratranz CSV", command=self.export_para_csv)
-        self.btn_export_md = ttk.Button(self.export_actions_fr, text="导出报告MD", command=self.export_report_md)
+        self.btn_export_doc = ttk.Button(self.export_actions_fr, text="导出报告DOC", command=self.export_report_doc)
         self.btn_export_state = ttk.Button(self.export_actions_fr, text="导出内部状态JSON", command=self.export_state_json)
         self.btn_export_new_terms = ttk.Button(self.export_actions_fr, text="导出新术语", command=self.export_new_terms)
         self.btn_export_para_json.pack(side="left", padx=5, pady=8)
         self.btn_export_para_csv.pack(side="left", padx=5, pady=8)
-        self.btn_export_md.pack(side="left", padx=5, pady=8)
+        self.btn_export_doc.pack(side="left", padx=5, pady=8)
         self.btn_export_state.pack(side="left", padx=5, pady=8)
         self.btn_export_new_terms.pack(side="left", padx=5, pady=8)
 
@@ -158,20 +158,20 @@ class RunTab(ttk.Frame):
             self.ent_in.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
             self.btn_in.grid(row=0, column=2, padx=5, pady=5)
 
+            self.lbl_term.grid(row=1, column=0, padx=5, pady=5, sticky="w")
+            self.ent_term.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
+            self.btn_term.grid(row=1, column=2, padx=5, pady=5)
+
             self.lbl_out.config(text="生成存档:")
-            self.lbl_out.grid(row=1, column=0, padx=5, pady=5, sticky="w")
-            self.ent_out.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
+            self.lbl_out.grid(row=2, column=0, padx=5, pady=5, sticky="w")
+            self.ent_out.grid(row=2, column=1, padx=5, pady=5, sticky="ew")
             self.btn_out.config(
                 command=lambda: self._sel_file(
                     self.ent_out, [("JSON", "*.json")],
                     save=True, init_dir=DEFAULT_DIR_NAME
                 )
             )
-            self.btn_out.grid(row=1, column=2, padx=5, pady=5)
-
-            self.lbl_term.grid(row=2, column=0, padx=5, pady=5, sticky="w")
-            self.ent_term.grid(row=2, column=1, padx=5, pady=5, sticky="ew")
-            self.btn_term.grid(row=2, column=2, padx=5, pady=5)
+            self.btn_out.grid(row=2, column=2, padx=5, pady=5)
 
         else:  # resume
             self.lbl_out.config(text="选择存档:")
@@ -260,8 +260,8 @@ class RunTab(ttk.Frame):
             return out_dir, f"{base}_paratranz.json", [("JSON", "*.json")], ".json"
         if kind == "para_csv":
             return out_dir, f"{base}_paratranz.csv", [("CSV", "*.csv")], ".csv"
-        if kind == "md":
-            return out_dir, f"{base}_final.md", [("Markdown", "*.md")], ".md"
+        if kind == "doc":
+            return out_dir, f"{base}_final.docx", [("Word Document", "*.docx")], ".docx"
         if kind == "state_json":
             return out_dir, f"{base}_state.json", [("JSON", "*.json")], ".json"
         if kind == "new_terms":
@@ -468,22 +468,106 @@ class RunTab(ttk.Frame):
         except Exception as e:
             messagebox.showerror("导出失败", str(e))
 
-    def export_report_md(self):
+    def export_report_doc(self):
         err = self._ensure_can_export()
         if err:
             return messagebox.showwarning("提示", err)
 
         f_arc = self.arc_var.get().strip()
-        out_md = self._ask_save_path("md")
-        if not out_md:
+        out_doc = self._ask_save_path("doc")
+        if not out_doc:
             return
 
         try:
+            # 1. 加载数据
             blocks, _, _ = FormatConverter.load_from_json(f_arc)
-            FormatConverter.export_to_markdown(blocks, out_md)
-            messagebox.showinfo("成功", f"已导出：\n{os.path.basename(out_md)}")
+            
+            # 2. 生成 Markdown 内容到内存
+            import io
+            md_buffer = io.StringIO()
+            
+            # 临时重定向文件写入到内存缓冲区
+            original_open = open
+            def mock_open(path, *args, **kwargs):
+                if path == out_doc.replace('.docx', '.md'):
+                    return md_buffer
+                return original_open(path, *args, **kwargs)
+            
+            # 使用 StringIO 来捕获 Markdown 内容
+            import sys
+            from core.format_converter import FormatConverter
+            from core.md2doc import parse_and_convert
+            
+            # 生成 Markdown 内容
+            md_content = self._generate_markdown_content(blocks, is_proof2=False)
+            
+            # 3. 转换为 DOC
+            parse_and_convert(md_content, out_doc)
+            
+            messagebox.showinfo("成功", f"已导出：\n{os.path.basename(out_doc)}")
         except Exception as e:
             messagebox.showerror("导出失败", str(e))
+    
+    def _generate_markdown_content(self, blocks, is_proof2=False):
+        """生成 Markdown 内容字符串"""
+        import re
+        header_pat = re.compile(r"^(#{1,6})\s+(.*)", re.DOTALL)
+        clean_pat = re.compile(r"^#+\s*")
+        
+        lines = []
+        lines.append("# 校对报告\n")
+        lines.append("> 目录结构基于原文 Markdown 标记还原\n")
+        
+        for block in blocks:
+            original = block.en_block.strip()
+            key = block.key
+            
+            # 获取原始译文（一校结果）
+            original_translation = block.proofread1_zh or block.zh_block or ""
+            original_translation = original_translation.strip()
+            
+            # 根据是一校还是二校选择对应的校对译文和注释
+            if is_proof2:
+                proof = block.proofread_zh or block.proofread1_zh or ""
+                note = block.proofread_note or ""
+            else:
+                proof = block.proofread1_zh or ""
+                note = block.proofread1_note or ""
+            
+            proof = proof.strip()
+            note = note.strip()
+            
+            match = header_pat.match(original)
+            
+            if match:
+                hashes = match.group(1)
+                clean_original = match.group(2).strip()
+                
+                clean_proof = clean_pat.sub("", proof).strip()
+                display_title = clean_proof if clean_proof else clean_original
+                
+                lines.append(f"\n{hashes} {display_title}\n")
+                lines.append(f"*{clean_original}* `[{key}]`\n")
+                
+                if original_translation:
+                    lines.append(f"> 原始译文: {original_translation}\n")
+                
+                if note:
+                    lines.append(f"> 标题建议: {note}\n")
+            else:
+                lines.append(f"\n**[{key}]**\n")
+                lines.append(f"> 原文: {original}\n")
+                
+                if original_translation:
+                    lines.append(f"> 原始译文: {original_translation}\n")
+                
+                if proof:
+                    lines.append(f"> 校对: **{proof}**\n")
+                
+                if note:
+                    lines.append(f"> *建议: {note}*\n")
+        
+        return "\n".join(lines)
 
     def export_state_json(self):
         err = self._ensure_can_export()

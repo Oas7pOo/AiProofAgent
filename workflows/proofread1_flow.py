@@ -201,7 +201,6 @@ class Proofread1Workflow:
         return result
     
     def _process_recursive(self, batch: List[TranslationBlock], depth: int = 0) -> List[TranslationBlock]:
-        """递归处理批次，包含失败重试和任务拆分机制"""
         if not batch:
             return batch
         
@@ -236,7 +235,7 @@ class Proofread1Workflow:
 
 【处理逻辑 - 请严格遵守】
 对于每一个 Block
-- proofread_zh：输出修正后的译文。
+- proofread_zh：输出修正后的译文。HTML 标签中的引号冲突必须对内部的引号进行转义。
 - proofread_note：输出具体的修改原因（如：术语修正/语法优化/风格调整）。如果没有修改，请留空字符串。
 - new_terms: 仅当该块中出现明确"专有名词/术语/人名/地名"且不在术语表内时才输出；否则 []。
   new_terms 每项必须是：{{'term': '英文术语', 'translation': '中文译名', 'note': '可选备注'}}
@@ -261,11 +260,25 @@ class Proofread1Workflow:
                 json_str = re.sub(r'^```[jJ]son\s*', '', response.strip())
                 json_str = re.sub(r'\s*```$', '', json_str)
                 
-                # 解析 JSON
-                result_data = json.loads(json_str)
-                
-                # 处理返回结果
-                if isinstance(result_data, list):
+                # 解析和验证 JSON
+                try:
+                    result_data = json.loads(json_str)
+                    
+                    # 验证返回结果是否为列表
+                    if not isinstance(result_data, list):
+                        raise ValueError("返回的结果不是 JSON 列表")
+                    
+                    # 验证长度是否匹配
+                    if len(result_data) != len(batch):
+                        raise ValueError(f"返回的数组长度 ({len(result_data)}) 与请求片段数量 ({len(batch)}) 不匹配")
+                    
+                    # 验证 BLOCK_ID 是否匹配
+                    req_keys = [str(block.key) for block in batch]
+                    resp_keys = [str(item.get("BLOCK_ID")) for item in result_data]
+                    if set(req_keys) != set(resp_keys):
+                        raise ValueError(f"返回的 BLOCK_ID {resp_keys} 与请求 {req_keys} 不匹配")
+                    
+                    # 处理返回结果
                     # 创建块映射，方便查找
                     block_map = {block.key: block for block in batch}
                     
@@ -298,8 +311,45 @@ class Proofread1Workflow:
                             block.stage = 1  # 标记完成一校
                     
                     return batch
-                else:
-                    raise ValueError("返回的结果不是 JSON 列表")
+                    
+                except Exception as e:
+                    # JSON 解析失败，尝试通过正则表达式提取数据
+                    logger.warning(f"JSON 解析失败，尝试正则提取: {e}")
+                    extracted_data = self._extract_data_from_text(json_str, batch)
+                    if extracted_data:
+                        logger.info(f"正则提取成功，提取到 {len(extracted_data)} 条数据")
+                        # 处理提取的数据
+                        block_map = {block.key: block for block in batch}
+                        for item in extracted_data:
+                            block_id = item.get("BLOCK_ID")
+                            if block_id and block_id in block_map:
+                                block = block_map[block_id]
+                                block.proofread1_zh = item.get("proofread_zh", "")
+                                block.proofread1_note = item.get("proofread_note", "")
+                                # 处理新术语
+                                new_terms = item.get("new_terms", [])
+                                if isinstance(new_terms, list):
+                                    block.new_terms = new_terms
+                                    for term_data in new_terms:
+                                        term = term_data.get("term", "").strip()
+                                        translation = term_data.get("translation", "").strip()
+                                        note = term_data.get("note", "").strip()
+                                        if term and translation:
+                                            existing_terms = [t for t in self.new_terms.terms if t.term == term]
+                                            if not existing_terms:
+                                                self.new_terms.terms.append(TermEntry(
+                                                    term=term,
+                                                    translation=translation,
+                                                    note=note
+                                                ))
+                                    self.new_terms._build_matchers()
+                                block.stage = 1
+                        return batch
+                    
+                    # 显示前 500 字符的 JSON 内容，帮助定位问题
+                    preview = json_str[:500] + "..." if len(json_str) > 500 else json_str
+                    error_msg = f"JSON 解析失败: {e}\n\n返回的 JSON 内容:\n{preview}"
+                    raise ValueError(error_msg)
                 
             except Exception as e:
                 # 致命错误直接熔断
@@ -307,10 +357,12 @@ class Proofread1Workflow:
                     raise
                 
                 if attempt < MAX_RETRIES - 1:
-                    logger.warning(f"[Depth={depth}] 重试 {attempt+1}/{MAX_RETRIES}: {e}")
-                    time.sleep(2)
+                    # 重试等待时间使用配置值
+                    retry_wait = self.runner.delay_seconds if self.runner.delay_seconds > 0 else 2
+                    logger.warning(f"[Depth={depth}] 请求失败，{retry_wait} 秒后进行第 {attempt+1} 次重试: {e}")
+                    time.sleep(retry_wait)
                 else:
-                    logger.error(f"[Depth={depth}] 所有重试失败: {e}")
+                    logger.error(f"[Depth={depth}] 已达最大重试次数，当前批次失败: {e}")
         
         # 拆分阶段：只有当重试彻底失败才会走到这里
         if len(batch) > 1:
@@ -327,6 +379,47 @@ class Proofread1Workflow:
         block.stage = 1  # 标记为已处理（错误）
         
         return batch
+    
+    def _extract_data_from_text(self, text: str, batch: List[TranslationBlock]) -> List[dict]:
+        """当 JSON 解析失败时，通过正则表达式从文本中提取数据"""
+        import re
+        result = []
+        req_keys = [str(block.key) for block in batch]
+        
+        # 尝试匹配每个 BLOCK_ID 对应的数据块
+        for block_id in req_keys:
+            # 构建正则表达式模式，匹配该 BLOCK_ID 对应的对象
+            # 匹配模式: "BLOCK_ID": "xxx" ... "proofread_zh": "..." ... "proofread_note": "..."
+            pattern = r'"BLOCK_ID"\s*:\s*"' + re.escape(block_id) + r'"[^}]*"proofread_zh"\s*:\s*"([^"]*)"[^}]*"proofread_note"\s*:\s*"([^"]*)"'
+            
+            match = re.search(pattern, text, re.DOTALL)
+            if match:
+                proofread_zh = match.group(1)
+                proofread_note = match.group(2)
+                
+                # 尝试提取 new_terms（可选）
+                new_terms = []
+                new_terms_pattern = r'"BLOCK_ID"\s*:\s*"' + re.escape(block_id) + r'"[^}]*"new_terms"\s*:\s*(\[[^\]]*\])'
+                new_terms_match = re.search(new_terms_pattern, text, re.DOTALL)
+                if new_terms_match:
+                    try:
+                        new_terms_str = new_terms_match.group(1)
+                        new_terms = json.loads(new_terms_str)
+                    except:
+                        pass  # 如果 new_terms 解析失败，使用空列表
+                
+                result.append({
+                    "BLOCK_ID": block_id,
+                    "proofread_zh": proofread_zh,
+                    "proofread_note": proofread_note,
+                    "new_terms": new_terms
+                })
+        
+        # 如果正则提取的数据数量与请求的不一致，返回空列表表示失败
+        if len(result) != len(batch):
+            return []
+        
+        return result
     
 
 

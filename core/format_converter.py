@@ -104,10 +104,11 @@ class FormatConverter:
             raise
 
     @staticmethod
-    def export_to_markdown(blocks: List[TranslationBlock], file_path: str, prefer_proofread: bool = True):
+    def export_to_markdown(blocks: List[TranslationBlock], file_path: str, prefer_proofread: bool = True, is_proof2: bool = False):
         """
         将数据导出为 Markdown 文档，与旧版本格式一致。
         prefer_proofread: 若为 True，则优先输出处理过的最终译文，否则退化为原文/初步识别结果。
+        is_proof2: 若为 True，则为二校模式，校对译文优先使用 proofread_zh，否则使用 proofread1_zh
         """
         try:
             import re
@@ -122,11 +123,24 @@ class FormatConverter:
                 
                 for block in blocks:
                     original = block.en_block.strip()
-                    proof = block.proofread_zh or block.proofread1_zh or block.zh_block or ""
-                    proof = proof.strip()
-                    note = block.proofread_note or block.proofread1_note or ""
-                    note = note.strip()
                     key = block.key
+                    
+                    # 获取原始译文（一校结果）
+                    original_translation = block.proofread1_zh or block.zh_block or ""
+                    original_translation = original_translation.strip()
+                    
+                    # 根据是一校还是二校选择对应的校对译文和注释
+                    if is_proof2:
+                        # 二校：优先使用 proofread_zh，如果为空则使用 proofread1_zh
+                        proof = block.proofread_zh or block.proofread1_zh or ""
+                        note = block.proofread_note or ""
+                    else:
+                        # 一校：使用 proofread1_zh 和 proofread1_note
+                        proof = block.proofread1_zh or ""
+                        note = block.proofread1_note or ""
+                    
+                    proof = proof.strip()
+                    note = note.strip()
                     
                     match = header_pat.match(original)
                     
@@ -140,11 +154,19 @@ class FormatConverter:
                         f.write(f"{hashes} {display_title}\n\n")
                         f.write(f"*{clean_original}* `[{key}]`\n\n")
                         
+                        # 添加原始译文（如果有）
+                        if original_translation:
+                            f.write(f"> 原始译文: {original_translation}\n\n")
+                        
                         if note:
                             f.write(f"> 标题建议: {note}\n\n")
                     else:
                         f.write(f"**[{key}]**\n")
                         f.write(f"> 原文: {original}\n")
+                        
+                        # 添加原始译文（如果有）
+                        if original_translation:
+                            f.write(f"> 原始译文: {original_translation}\n")
                         
                         clean_proof_body = clean_pat.sub("", proof).strip()
                         if clean_proof_body:

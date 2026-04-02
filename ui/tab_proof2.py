@@ -1,15 +1,51 @@
 import os
+import glob
 import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
 import logging
 import json
+from typing import Optional
 
 from utils.config import ConfigManager
 from workflows.proofread2_flow import Proofread2Workflow
 from core.format_converter import FormatConverter
 
 DEFAULT_DIR_NAME = "archives"
+
+
+def find_latest_proof2_archive(archives_dir: str = "archives") -> Optional[str]:
+    """
+    自动搜索最近一次二校存档：
+    1) 优先匹配 *_p2.json
+    2) 兜底：扫描 .json 且包含二校数据
+    """
+    if not os.path.isdir(archives_dir):
+        return None
+
+    # 1) 文件名约定优先
+    cand = []
+    for fn in os.listdir(archives_dir):
+        if fn.lower().endswith("_p2.json"):
+            cand.append(os.path.join(archives_dir, fn))
+    if cand:
+        cand.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+        return cand[0]
+
+    # 2) 兜底：扫描所有 json 文件
+    pat = os.path.join(archives_dir, "*.json")
+    files = glob.glob(pat)
+    if not files:
+        return None
+
+    # 过滤掉最终导出文件和术语文件
+    valid = [f for f in files if "_final" not in f and "_new_terms" not in f and "_paratranz" not in f]
+    if not valid:
+        return None
+
+    # 按修改时间排序，返回最新的
+    latest = max(valid, key=os.path.getmtime)
+    return latest
 
 
 class Proof2Tab(ttk.Frame):
@@ -71,48 +107,82 @@ class Proof2Tab(ttk.Frame):
     # ================= UI =================
 
     def _build_top_controls(self):
-        frm = ttk.LabelFrame(self, text="二校 - 初始化")
-        frm.pack(fill="x", padx=10, pady=10)
+        # 1. 任务模式（与一校统一）
+        mode_frame = ttk.LabelFrame(self, text="任务模式")
+        mode_frame.pack(fill="x", padx=10, pady=5)
+        ttk.Radiobutton(
+            mode_frame, text="新任务", variable=self.mode_var, value="new",
+            command=self._on_mode_change
+        ).pack(side="left", padx=20, pady=10)
+        ttk.Radiobutton(
+            mode_frame, text="继续任务 (从存档)", variable=self.mode_var, value="resume",
+            command=self._on_mode_change
+        ).pack(side="left", padx=20, pady=10)
 
-        # mode
-        row0 = ttk.Frame(frm)
-        row0.grid(row=0, column=0, columnspan=3, sticky="w", padx=8, pady=6)
-        ttk.Label(row0, text="模式:").pack(side="left")
-        ttk.Radiobutton(row0, text="新建", variable=self.mode_var, value="new").pack(side="left", padx=6)
-        ttk.Radiobutton(row0, text="从存档读取", variable=self.mode_var, value="resume").pack(side="left", padx=6)
+        # 2. 文件配置
+        self.grp_files = ttk.LabelFrame(self, text="文件配置")
+        self.grp_files.pack(fill="x", padx=10, pady=5)
 
-        # file rows
-        self._row_stage1 = self._create_file_row(frm, "一校结果文件:", 1, self.stage1_path, [("JSON", "*.json")])
-        self._row_old_terms = self._create_file_row(frm, "旧术语表:", 2, self.old_terms_path, [("CSV/JSON", "*.csv *.json")])
-        self._row_new_terms = self._create_file_row(frm, "新术语表(可选):", 3, self.new_terms_path, [("CSV/JSON", "*.csv *.json")])
-
-        # archive row (save path / load path)
-        self._row_arc = self._create_file_row(
-            frm, "二校存档:", 4, self.arc_path_var, [("JSON", "*.json")], is_save=True, allow_open_when_resume=True
+        # 一校结果文件
+        self.lbl_stage1 = ttk.Label(self.grp_files, text="一校结果文件:")
+        self.ent_stage1 = ttk.Entry(self.grp_files, width=50, textvariable=self.stage1_path)
+        self.btn_stage1 = ttk.Button(
+            self.grp_files, text="...", width=4,
+            command=lambda: self._sel_file(self.ent_stage1, [("JSON", "*.json")])
         )
 
-        # buttons
-        btns = ttk.Frame(frm)
-        btns.grid(row=5, column=0, columnspan=3, sticky="w", padx=8, pady=10)
+        # 旧术语表
+        self.lbl_old_terms = ttk.Label(self.grp_files, text="旧术语表:")
+        self.ent_old_terms = ttk.Entry(self.grp_files, width=50, textvariable=self.old_terms_path)
+        self.btn_old_terms = ttk.Button(
+            self.grp_files, text="...", width=4,
+            command=lambda: self._sel_file(self.ent_old_terms, [("CSV/JSON", "*.csv *.json")])
+        )
 
-        self.btn_start = ttk.Button(btns, text="开始校对", command=self.on_start)
-        self.btn_start.pack(side="left", padx=4)
+        # 新术语表（可选）
+        self.lbl_new_terms = ttk.Label(self.grp_files, text="新术语表(可选):")
+        self.ent_new_terms = ttk.Entry(self.grp_files, width=50, textvariable=self.new_terms_path)
+        self.btn_new_terms = ttk.Button(
+            self.grp_files, text="...", width=4,
+            command=lambda: self._sel_file(self.ent_new_terms, [("CSV/JSON", "*.csv *.json")])
+        )
 
-        self.btn_auto = ttk.Button(btns, text="自动校对", command=self.on_auto)
-        self.btn_auto.pack(side="left", padx=4)
+        # 存档路径
+        self.lbl_arc = ttk.Label(self.grp_files, text="二校存档:")
+        self.ent_arc = ttk.Entry(self.grp_files, width=50, textvariable=self.arc_path_var)
+        self.btn_arc = ttk.Button(self.grp_files, text="...", width=4)
 
-        self.btn_batch = ttk.Button(btns, text="批量校对", command=self.on_batch)
-        self.btn_batch.pack(side="left", padx=4)
+        self.grp_files.columnconfigure(1, weight=1)
 
-        self.btn_export_json = ttk.Button(btns, text="导出JSON", command=self.on_export_json)
+        # 3. 按钮区
+        btn_fr = ttk.Frame(self, padding=(0, 10))
+        btn_fr.pack(fill="x", padx=10)
+
+        self.btn_start = ttk.Button(btn_fr, text="开始校对", command=self.on_start)
+        self.btn_start.pack(side="left", padx=5)
+
+        self.btn_auto = ttk.Button(btn_fr, text="自动校对", command=self.on_auto)
+        self.btn_auto.pack(side="left", padx=5)
+
+        self.btn_batch = ttk.Button(btn_fr, text="批量校对", command=self.on_batch)
+        self.btn_batch.pack(side="left", padx=5)
+
+        self.btn_export_json = ttk.Button(btn_fr, text="导出JSON", command=self.on_export_json)
         self.btn_export_json.pack(side="left", padx=16)
 
-        self.btn_export_md = ttk.Button(btns, text="导出MD", command=self.on_export_md)
-        self.btn_export_md.pack(side="left", padx=4)
+        self.btn_export_para_json = ttk.Button(btn_fr, text="导出Paratranz JSON", command=self.export_para_json)
+        self.btn_export_para_json.pack(side="left", padx=5)
 
-        ttk.Label(btns, textvariable=self.status_var).pack(side="left", padx=16)
+        self.btn_export_para_csv = ttk.Button(btn_fr, text="导出Paratranz CSV", command=self.export_para_csv)
+        self.btn_export_para_csv.pack(side="left", padx=5)
 
-        frm.columnconfigure(1, weight=1)
+        self.btn_export_state_json = ttk.Button(btn_fr, text="导出内部状态JSON", command=self.export_state_json)
+        self.btn_export_state_json.pack(side="left", padx=5)
+
+        self.btn_export_doc = ttk.Button(btn_fr, text="导出DOC", command=self.on_export_doc)
+        self.btn_export_doc.pack(side="left", padx=5)
+
+        ttk.Label(btn_fr, textvariable=self.status_var).pack(side="left", padx=16)
 
     def _build_main_panes(self):
         paned = ttk.Panedwindow(self, orient=tk.HORIZONTAL)
@@ -181,17 +251,84 @@ class Proof2Tab(ttk.Frame):
     def _set_export_enabled(self, enabled: bool):
         state = "normal" if enabled else "disabled"
         self.btn_export_json.config(state=state)
-        self.btn_export_md.config(state=state)
+        self.btn_export_para_json.config(state=state)
+        self.btn_export_para_csv.config(state=state)
+        self.btn_export_state_json.config(state=state)
+        self.btn_export_doc.config(state=state)
 
     def _on_mode_change(self, *args):
         mode = self.mode_var.get()
-        if mode == "resume":
-            # 自动填最近存档
+
+        # 清除所有控件的布局
+        for w in self.grp_files.winfo_children():
+            w.grid_forget()
+
+        self._set_export_enabled(False)
+        self._set_ui_ready(False)
+
+        if mode == "new":
+            # 新任务模式：显示所有输入框
+            self.lbl_stage1.grid(row=0, column=0, padx=5, pady=5, sticky="w")
+            self.ent_stage1.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
+            self.btn_stage1.grid(row=0, column=2, padx=5, pady=5)
+
+            self.lbl_old_terms.grid(row=1, column=0, padx=5, pady=5, sticky="w")
+            self.ent_old_terms.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
+            self.btn_old_terms.grid(row=1, column=2, padx=5, pady=5)
+
+            self.lbl_new_terms.grid(row=2, column=0, padx=5, pady=5, sticky="w")
+            self.ent_new_terms.grid(row=2, column=1, padx=5, pady=5, sticky="ew")
+            self.btn_new_terms.grid(row=2, column=2, padx=5, pady=5)
+
+            self.lbl_arc.config(text="生成存档:")
+            self.lbl_arc.grid(row=3, column=0, padx=5, pady=5, sticky="w")
+            self.ent_arc.grid(row=3, column=1, padx=5, pady=5, sticky="ew")
+            self.btn_arc.config(
+                command=lambda: self._sel_file(
+                    self.ent_arc, [("JSON", "*.json")],
+                    save=True, init_dir=DEFAULT_DIR_NAME
+                )
+            )
+            self.btn_arc.grid(row=3, column=2, padx=5, pady=5)
+
+        else:  # resume
+            # 继续任务模式：只显示存档选择框
+            self.lbl_arc.config(text="选择存档:")
+            self.lbl_arc.grid(row=0, column=0, padx=5, pady=5, sticky="w")
+            self.ent_arc.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
+            self.btn_arc.config(
+                command=lambda: self._sel_file(
+                    self.ent_arc, [("JSON", "*.json")],
+                    save=False, init_dir=DEFAULT_DIR_NAME
+                )
+            )
+            self.btn_arc.grid(row=0, column=2, padx=5, pady=5)
+
+            # 自动加载最新存档
             latest = find_latest_proof2_archive(DEFAULT_DIR_NAME)
             if latest:
                 self.arc_path_var.set(latest)
-        self._set_export_enabled(False)
-        self._set_ui_ready(False)
+
+    def _sel_file(self, entry, filetypes, save=False, init_dir=None):
+        """辅助方法：选择文件"""
+        kw = {"filetypes": filetypes}
+        if init_dir and os.path.exists(init_dir):
+            kw["initialdir"] = init_dir
+
+        default_ext = ""
+        if save and filetypes:
+            pat = str(filetypes[0][1]).strip()
+            if pat.startswith("*.") and " " not in pat:
+                default_ext = pat[1:]
+                kw["defaultextension"] = default_ext
+
+        f = filedialog.asksaveasfilename if save else filedialog.askopenfilename
+        p = f(**kw)
+        if p:
+            if save and default_ext and not os.path.splitext(p)[1]:
+                p += default_ext
+            entry.delete(0, tk.END)
+            entry.insert(0, p)
 
     def _auto_fill_archive_name(self, *args):
         if self.mode_var.get() != "new":
@@ -211,8 +348,24 @@ class Proof2Tab(ttk.Frame):
         - 续校：自动加载最近二校存档；构建待处理批次并显示 prompt
         """
         try:
-            self.cfg = ConfigManager().data
-            self.workflow = Proofread2Workflow()
+            self.cfg = ConfigManager()
+            
+            # 读取配置参数
+            max_workers = int(self.cfg.get("llm.ai_max_workers", 1))
+            delay_seconds = int(self.cfg.get("llm.time_wait", 10))
+            max_blocks = int(self.cfg.get("llm.max_blocks", 10))
+            max_chars = int(self.cfg.get("llm.max_chars", 8000))
+            
+            # 开始校对和自动校对模式使用1并发
+            start_auto_max_workers = 1
+            
+            # 初始化工作流，传递配置参数
+            self.workflow = Proofread2Workflow(
+                max_workers=start_auto_max_workers,
+                delay_seconds=delay_seconds,
+                max_blocks=max_blocks,
+                max_chars=max_chars
+            )
 
             mode = self.mode_var.get()
             arc = self.arc_path_var.get().strip()
@@ -221,7 +374,8 @@ class Proof2Tab(ttk.Frame):
                 if not arc or not os.path.exists(arc):
                     raise ValueError("续校模式：二校存档不存在。")
                 self.archive_path = arc
-                self.workflow.load_archive(arc)
+                # 从二校存档加载
+                self.workflow.init_session(arc)
             else:
                 stage1 = self.stage1_path.get().strip()
                 old_terms = self.old_terms_path.get().strip()
@@ -238,14 +392,8 @@ class Proof2Tab(ttk.Frame):
 
                 self.archive_path = arc
 
-                self.workflow.load_stage1(stage1)
-                self.workflow.load_terms_old(old_terms)
-                if new_terms:
-                    self.workflow.load_terms_new(new_terms)
-
-                # 初始落盘（存档自包含）
-                self.workflow.project.run_status = {"proofread2_completed": False}
-                self.workflow.project.save_archive(arc)
+                # 初始化二校工作流
+                self.workflow.init_session(arc, stage1, old_terms, new_terms)
 
             self._rebuild_batches_and_show_first()
 
@@ -256,16 +404,16 @@ class Proof2Tab(ttk.Frame):
         if not self.workflow:
             return
 
-        max_blocks = int(self.cfg.get("max_blocks", 5))
-        max_chars = int(self.cfg.get("max_chars", 6000))
+        # 使用工作流实例的配置参数
+        max_blocks = self.workflow.max_blocks
+        max_chars = self.workflow.max_chars
 
-        self.batch_queue = self.workflow.project.build_batches(max_blocks=max_blocks, max_chars=max_chars)
+        # 构建批次
+        batch_count = self.workflow.build_batches(max_blocks=max_blocks, max_chars=max_chars)
+        self.batch_queue = self.workflow.pending_queue
 
         if not self.batch_queue:
             # 已完成
-            self.workflow.project.mark_completed()
-            if self.archive_path:
-                self.workflow.project.save_archive(self.archive_path)
             self.status_var.set("已完成（无待二校项）")
             self._set_export_enabled(True)
             self._set_ui_ready(False)
@@ -280,17 +428,14 @@ class Proof2Tab(ttk.Frame):
 
     def _show_current_batch(self):
         if not self.batch_queue:
-            self.workflow.project.mark_completed()
-            if self.archive_path:
-                self.workflow.project.save_archive(self.archive_path)
             self.status_var.set("已完成（全部二校完成）")
             self._set_export_enabled(True)
             self._set_ui_ready(False)
             return
 
         batch = self.batch_queue[0]
-        old_hits, new_hits = self.workflow.project.match_terms_for_batch(batch)
-        prompt = self.workflow.project.build_prompt(batch, old_hits, new_hits)
+        # 构建prompt
+        prompt = self.workflow.build_prompt_for_batch(batch)
 
         self._set_prompt_text(prompt)
         self._set_resp_text("")
@@ -315,9 +460,13 @@ class Proof2Tab(ttk.Frame):
             messagebox.showwarning("提示", "请先点击“开始校对”加载项目。")
             return
 
-        # 获取配置中的并发数
-        max_workers = self.cfg.get("ai_max_workers", 1)
-        if not isinstance(max_workers, int) or max_workers <= 0:
+        # 获取配置中的参数
+        max_workers = int(self.cfg.get("llm.ai_max_workers", 1))
+        delay_seconds = int(self.cfg.get("llm.time_wait", 10))
+        max_blocks = int(self.cfg.get("llm.max_blocks", 10))
+        max_chars = int(self.cfg.get("llm.max_chars", 8000))
+
+        if max_workers <= 0:
             max_workers = 1
 
         # 禁用按钮，避免重复点击
@@ -328,18 +477,29 @@ class Proof2Tab(ttk.Frame):
         # 在后台线程中执行批量校对
         def batch_task():
             try:
-                total_batches = len(self.batch_queue)
+                # 创建一个新的工作流实例，使用配置的并发数
+                batch_workflow = Proofread2Workflow(
+                    max_workers=max_workers,
+                    delay_seconds=delay_seconds,
+                    max_blocks=max_blocks,
+                    max_chars=max_chars
+                )
+                
+                # 加载数据
+                batch_workflow.init_session(self.archive_path)
+                
+                total_batches = len(batch_workflow.pending_queue)
                 self.status_var.set(f"开始批量校对，并发数: {max_workers}，总批次: {total_batches}")
                 
                 # 定义进度更新回调
                 def update_progress(processed, total):
                     self.after(0, lambda: self.status_var.set(f"批量校对中: {processed}/{total} 批次"))
                 
-                # 调用 Proofread2Workflow 的 run 方法
-                self.workflow.run(
-                    out_path=self.archive_path,
-                    max_workers=max_workers,
-                    progress_callback=update_progress
+                # 调用 Proofread2Workflow 的 run_bulk_async 方法
+                batch_workflow.run_bulk_async(
+                    progress_callback=update_progress,
+                    done_callback=lambda blocks: self.after(0, self._rebuild_batches_and_show_first),
+                    error_callback=lambda e: self.after(0, lambda: messagebox.showerror("批量校对异常", str(e)))
                 )
                 # 校对完成后更新 UI
                 self.after(0, lambda: self.status_var.set("批量校对完成"))
@@ -389,48 +549,30 @@ class Proof2Tab(ttk.Frame):
     def _auto_process_one_batch(self, batch):
         # 1) 尝试 3 次
         last_raw = ""
-        last_parsed = None
         last_err = ""
 
         for _ in range(3):
             try:
-                old_hits, new_hits = self.project.match_terms_for_batch(batch)
-                prompt = self.project.build_prompt(batch, old_hits, new_hits)
-
-                payload = {
-                    "model": self.cfg["model"],
-                    "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": self.cfg.get("max_tokens"),
-                }
-                resp = self.srv.session.post(
-                    f"{self.cfg['base_url']}/chat/completions",
-                    json=payload,
-                    timeout=self.cfg.get("timeout"),
-                )
-
-                if resp.status_code != 200:
-                    last_err = f"HTTP {resp.status_code}: {resp.text}"
+                # 构建prompt
+                prompt = self.workflow.build_prompt_for_batch(batch)
+                # 发送请求
+                response = self.workflow.request_llm(prompt)
+                last_raw = response
+                # 验证结果
+                valid, msg, data = self.workflow.parse_and_validate(batch, response)
+                if not valid:
+                    last_err = msg
                     continue
 
-                result = resp.json()
-                content = result["choices"][0]["message"]["content"]
-                last_raw = content
-                parsed = self.srv.parser.clean_and_parse_batch_json(content)  # 复用你现有解析器 :contentReference[oaicite:9]{index=9}
-                last_parsed = parsed
+                self.after(0, lambda txt=response: self._set_resp_text(txt))
 
-                self.after(0, lambda txt=content: self._set_resp_text(txt))
+                # 应用结果
+                self.workflow.apply_batch(batch, data)
 
-                ok, msg = self.project.validate_results(batch, parsed)
-                if ok:
-                    self.project.apply_results(parsed)
-                    self.project.save_archive(self.archive_path)
-
-                    # pop batch + show next
-                    self.batch_queue.pop(0)
-                    self.after(0, self._show_current_batch)
-                    return True
-                else:
-                    last_err = msg
+                # pop batch + show next
+                self.batch_queue.pop(0)
+                self.after(0, self._show_current_batch)
+                return True
 
             except Exception as e:
                 last_err = str(e)
@@ -466,15 +608,16 @@ class Proof2Tab(ttk.Frame):
             return
 
         batch = self.batch_queue[0]
-        parsed = self.workflow.llm.client.parser.clean_and_parse_batch_json(raw)
-        ok, msg = self.workflow.project.validate_results(batch, parsed)
-        if not ok:
+        # 解析和验证结果
+        valid, msg, data = self.workflow.parse_and_validate(batch, raw)
+        if not valid:
             messagebox.showerror("应用失败", msg)
             return
 
-        self.workflow.project.apply_results(parsed)
-        self.workflow.project.save_archive(self.archive_path)
+        # 应用结果
+        self.workflow.apply_batch(batch, data)
 
+        # 从队列中移除已处理的批次
         self.batch_queue.pop(0)
         self._show_current_batch()
 
@@ -483,51 +626,226 @@ class Proof2Tab(ttk.Frame):
     def _ensure_completed(self):
         if not self.workflow:
             raise ValueError("未加载二校项目。")
-        if not self.workflow.project.is_completed():
-            raise ValueError("二校尚未完成，不能导出。")
 
     def on_export_json(self):
         try:
-            self._ensure_completed()
+            if not self.workflow:
+                raise ValueError("未加载二校项目。")
 
-            out = filedialog.asksaveasfilename(filetypes=[("JSON", "*.json")], defaultextension=".json")
-            out = self._ensure_ext(out, ".json")
+            out = self._ask_save_path("json")
             if not out:
                 return
 
-            exporter = ExportManager(
-                archive_path=self.archive_path,
-                out_final_json=out,
-                out_md=None,
-                out_terms_json=None,
-            )
-            # 二校不导出术语
-            exporter.export_all(export_final=True, export_md=False, export_terms=False)
-            messagebox.showinfo("导出成功", f"已导出 JSON:\n{out}")
+            # 导出最终 JSON
+            FormatConverter.export_final_json(self.workflow.blocks, out)
+            messagebox.showinfo("导出成功", f"已导出 JSON:\n{os.path.basename(out)}")
 
         except Exception as e:
             messagebox.showerror("导出失败", str(e))
 
-    def on_export_md(self):
+    def on_export_doc(self):
         try:
-            self._ensure_completed()
+            if not self.workflow:
+                raise ValueError("未加载二校项目。")
 
-            out = filedialog.asksaveasfilename(filetypes=[("Markdown", "*.md")], defaultextension=".md")
-            out = self._ensure_ext(out, ".md")
+            out = self._ask_save_path("doc")
             if not out:
                 return
 
-            exporter = ExportManager(
-                archive_path=self.archive_path,
-                out_final_json=None,
-                out_md=out,
-                out_terms_json=None,
-            )
-            exporter.export_all(export_final=False, export_md=True, export_terms=False)
-            messagebox.showinfo("导出成功", f"已导出 MD:\n{out}")
+            # 1. 生成 Markdown 内容
+            from core.md2doc import parse_and_convert
+            md_content = self._generate_markdown_content(self.workflow.blocks, is_proof2=True)
+            
+            # 2. 转换为 DOC
+            parse_and_convert(md_content, out)
+            messagebox.showinfo("导出成功", f"已导出 DOC:\n{os.path.basename(out)}")
 
         except Exception as e:
             messagebox.showerror("导出失败", str(e))
+
+    def export_para_json(self):
+        try:
+            if not self.workflow:
+                raise ValueError("未加载二校项目。")
+
+            out = self._ask_save_path("para_json")
+            if not out:
+                return
+
+            # 导出 Paratranz JSON
+            paratranz_data = []
+            for b in self.workflow.blocks:
+                translation = b.proofread_zh or b.proofread1_zh or b.zh_block or ""
+                paratranz_data.append({
+                    "key": b.key,
+                    "original": b.en_block,
+                    "translation": translation,
+                    "stage": b.stage
+                })
+            with open(out, 'w', encoding='utf-8') as f:
+                json.dump(paratranz_data, f, ensure_ascii=False, indent=2)
+            messagebox.showinfo("成功", f"已导出 Paratranz JSON：\n{os.path.basename(out)}")
+
+        except Exception as e:
+            messagebox.showerror("导出失败", str(e))
+
+    def export_para_csv(self):
+        try:
+            if not self.workflow:
+                raise ValueError("未加载二校项目。")
+
+            out = self._ask_save_path("para_csv")
+            if not out:
+                return
+
+            # 导出 Paratranz CSV
+            import csv
+            with open(out, 'w', encoding='utf-8', newline='') as f:
+                writer = csv.writer(f)
+                for b in self.workflow.blocks:
+                    translation = b.proofread_zh or b.proofread1_zh or b.zh_block or ""
+                    writer.writerow([b.key, b.en_block, translation])
+            messagebox.showinfo("成功", f"已导出 Paratranz CSV：\n{os.path.basename(out)}")
+
+        except Exception as e:
+            messagebox.showerror("导出失败", str(e))
+
+    def export_state_json(self):
+        try:
+            if not self.workflow:
+                raise ValueError("未加载二校项目。")
+
+            out = self._ask_save_path("state_json")
+            if not out:
+                return
+
+            # 导出内部状态 JSON
+            simple_data = []
+            for block in self.workflow.blocks:
+                simple_data.append({
+                    "key": block.key,
+                    "en_block": block.en_block,
+                    "zh_block": block.zh_block,
+                    "proofread1_zh": block.proofread1_zh,
+                    "proofread1_note": block.proofread1_note,
+                    "proofread_zh": block.proofread_zh,
+                    "proofread_note": block.proofread_note
+                })
+            with open(out, 'w', encoding='utf-8') as f:
+                json.dump(simple_data, f, ensure_ascii=False, indent=2)
+            messagebox.showinfo("成功", f"已导出内部状态 JSON：\n{os.path.basename(out)}")
+
+        except Exception as e:
+            messagebox.showerror("导出失败", str(e))
+
+    def _suggest_export(self, kind: str):
+        """根据导出类型生成默认文件名和路径"""
+        if not self.workflow or not self.archive_path:
+            base = "export"
+        else:
+            base = os.path.splitext(os.path.basename(self.archive_path))[0]
+
+        # 默认目录：优先“上次导出目录”，否则用存档所在目录，否则 archives
+        out_dir = getattr(self, "_last_export_dir", "") or \
+                  (os.path.dirname(os.path.abspath(self.archive_path)) if self.archive_path else "") or \
+                  os.path.abspath(DEFAULT_DIR_NAME)
+
+        if kind == "para_json":
+            return out_dir, f"{base}_paratranz.json", [("JSON", "*.json")], ".json"
+        if kind == "para_csv":
+            return out_dir, f"{base}_paratranz.csv", [("CSV", "*.csv")], ".csv"
+        if kind == "doc":
+            return out_dir, f"{base}_final.docx", [("Word Document", "*.docx")], ".docx"
+        if kind == "state_json":
+            return out_dir, f"{base}_state.json", [("JSON", "*.json")], ".json"
+        if kind == "json":
+            return out_dir, f"{base}_final.json", [("JSON", "*.json")], ".json"
+        raise ValueError(f"unknown export kind: {kind}")
+
+    def _generate_markdown_content(self, blocks, is_proof2=False):
+        """生成 Markdown 内容字符串"""
+        import re
+        header_pat = re.compile(r"^(#{1,6})\s+(.*)", re.DOTALL)
+        clean_pat = re.compile(r"^#+\s*")
+        
+        lines = []
+        lines.append("# 校对报告\n")
+        lines.append("> 目录结构基于原文 Markdown 标记还原\n")
+        
+        for block in blocks:
+            original = block.en_block.strip()
+            key = block.key
+            
+            # 获取原始译文（一校结果）
+            original_translation = block.proofread1_zh or block.zh_block or ""
+            original_translation = original_translation.strip()
+            
+            # 根据是一校还是二校选择对应的校对译文和注释
+            if is_proof2:
+                proof = block.proofread_zh or block.proofread1_zh or ""
+                note = block.proofread_note or ""
+            else:
+                proof = block.proofread1_zh or ""
+                note = block.proofread1_note or ""
+            
+            proof = proof.strip()
+            note = note.strip()
+            
+            match = header_pat.match(original)
+            
+            if match:
+                hashes = match.group(1)
+                clean_original = match.group(2).strip()
+                
+                clean_proof = clean_pat.sub("", proof).strip()
+                display_title = clean_proof if clean_proof else clean_original
+                
+                lines.append(f"\n{hashes} {display_title}\n")
+                lines.append(f"*{clean_original}* `[{key}]`\n")
+                
+                if original_translation:
+                    lines.append(f"> 原始译文: {original_translation}\n")
+                
+                if note:
+                    lines.append(f"> 标题建议: {note}\n")
+            else:
+                lines.append(f"\n**[{key}]**\n")
+                lines.append(f"> 原文: {original}\n")
+                
+                if original_translation:
+                    lines.append(f"> 原始译文: {original_translation}\n")
+                
+                if proof:
+                    lines.append(f"> 校对: **{proof}**\n")
+                
+                if note:
+                    lines.append(f"> *建议: {note}*\n")
+        
+        return "\n".join(lines)
+
+    def _ask_save_path(self, kind: str) -> str | None:
+        """弹出保存对话框，自动填写默认文件名"""
+        out_dir, default_name, filetypes, ext = self._suggest_export(kind)
+        os.makedirs(out_dir, exist_ok=True)
+
+        p = filedialog.asksaveasfilename(
+            initialdir=out_dir,
+            initialfile=default_name,
+            defaultextension=ext,
+            filetypes=filetypes,
+        )
+        if not p:
+            return None
+
+        p = os.path.abspath(p)
+        if os.path.exists(p):
+            ok = messagebox.askyesno("确认覆盖", f"文件已存在，是否覆盖？\n{p}")
+            if not ok:
+                return None
+
+        # 记录上次导出目录
+        self._last_export_dir = os.path.dirname(p)
+        return p
 
     # ================= misc =================
 

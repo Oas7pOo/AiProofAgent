@@ -36,18 +36,24 @@ class BatchTaskRunner:
         results = []
         completed = 0
         
-        # 分批次执行，每个批次完成后等待delay_seconds
+        # 分批次执行
         for i in range(0, total, self.max_workers):
             batch = batches[i:i+self.max_workers]
             with ThreadPoolExecutor(max_workers=len(batch)) as executor:
-                futures = {executor.submit(func, b): i for i,b in enumerate(batch)}
+                futures = {}
+                # 关键修改：即使在并发内部，也交错启动请求，防止瞬间并发冲垮 API
+                for idx, b in enumerate(batch):
+                    futures[executor.submit(func, b)] = idx
+                    if self.delay_seconds > 0 and idx < len(batch) - 1:
+                        logger.info(f"并发启动交错间隔，等待 {self.delay_seconds} 秒...")
+                        time.sleep(self.delay_seconds)
+                
                 for future in as_completed(futures):
                     try:
                         data = future.result()
                         results.append(data)
                     except Exception as e:
                         logger.error(f"并发任务执行失败: {e}", exc_info=True)
-                        # 发生致命错误时，立即取消尚未开始的排队任务
                         for f in futures:
                             f.cancel()
                         if on_error:
@@ -57,9 +63,9 @@ class BatchTaskRunner:
                     if on_progress:
                         on_progress(completed, total)
             
-            # 批次完成后等待delay_seconds，除了最后一批
+            # 整个批次完成后等待，除了最后一批
             if self.delay_seconds and i + self.max_workers < total:
-                logger.info(f"批次完成，等待 {self.delay_seconds} 秒后执行下一批次")
+                logger.info(f"批次执行完毕，冷却等待 {self.delay_seconds} 秒...")
                 time.sleep(self.delay_seconds)
                 
         if on_complete:

@@ -19,7 +19,7 @@ class Proofread2Workflow:
     """
     二校业务编排层 (支持交互式人工校验与自动断点)
     """
-    def __init__(self, config_path="config.yaml"):
+    def __init__(self, config_path="config.yaml", max_workers=None, delay_seconds=None, max_blocks=None, max_chars=None):
         from utils.config import ConfigManager
         cfg = ConfigManager(config_path)
         
@@ -31,22 +31,21 @@ class Proofread2Workflow:
                     return v
             return default
         
-        max_workers = int(_get_val(["ai_max_workers", "llm.ai_max_workers"], 1))
-        delay_seconds = int(_get_val(["time_wait", "llm.time_wait"], 10))
-        max_blocks = int(_get_val(["max_blocks", "llm.max_blocks"], 10))
-        max_chars = int(_get_val(["max_chars", "llm.max_chars"], 8000))
+        # 使用外部传入的参数，如果没有则从配置文件读取
+        self.max_workers = max_workers if max_workers is not None else int(_get_val(["ai_max_workers", "llm.ai_max_workers"], 1))
+        self.delay_seconds = delay_seconds if delay_seconds is not None else int(_get_val(["time_wait", "llm.time_wait"], 10))
+        self.max_blocks = max_blocks if max_blocks is not None else int(_get_val(["max_blocks", "llm.max_blocks"], 10))
+        self.max_chars = max_chars if max_chars is not None else int(_get_val(["max_chars", "llm.max_chars"], 8000))
         
         self.llm_engine = LlmEngine(config_path)
-        self.runner = BatchTaskRunner(max_workers=max_workers, delay_seconds=delay_seconds)
+        self.runner = BatchTaskRunner(max_workers=self.max_workers, delay_seconds=self.delay_seconds)
         self.blocks: List[TranslationBlock] = []
         self.archive_path = ""
         self.old_terms = TermManager()
         self.new_terms = TermManager()
         self.pending_queue: List[List[TranslationBlock]] = []
-        self.max_blocks = max_blocks
-        self.max_chars = max_chars
         
-        logger.info(f"二校流水线配置: max_workers={max_workers}, delay_seconds={delay_seconds}, max_blocks={max_blocks}, max_chars={max_chars}")
+        logger.info(f"二校流水线配置: max_workers={self.max_workers}, delay_seconds={self.delay_seconds}, max_blocks={self.max_blocks}, max_chars={self.max_chars}")
 
     def init_session(self, archive_path: str, stage1_path: str = "", old_terms_path: str = "", new_terms_path: str = ""):
         self.archive_path = archive_path
@@ -81,6 +80,11 @@ class Proofread2Workflow:
                 # 从其他格式文件加载数据
                 self.blocks = FormatConverter.load_from_file(stage1_path)
                 logger.info(f"从一校结果 {stage1_path} 加载 {len(self.blocks)} 个数据块")
+            
+            # 确保所有块的stage设置为1（一校完成）
+            for block in self.blocks:
+                if block.stage < 1:
+                    block.stage = 1
             
             # 保存到二校存档
             FormatConverter.save_to_json(self.blocks, self.archive_path, self.old_terms, self.new_terms)
@@ -119,14 +123,17 @@ class Proofread2Workflow:
 
     def build_batches(self, max_blocks: int = 5, max_chars: int = 6000) -> int:
         """将待二校的数据分组装载至处理队列"""
-        pending = [b for b in self.blocks if b.stage == 1]
+        # 处理所有未二校的数据块（stage < 2），不强制要求必须经过一校
+        pending = [b for b in self.blocks if b.stage < 2]
         self.pending_queue = []
         
         current_batch = []
         current_chars = 0
         
         for b in pending:
-            text_len = len(b.en_block) + len(b.proofread1_zh)
+            # 优先使用一校译文，如果没有则使用原始译文
+            text_to_use = b.proofread1_zh if b.proofread1_zh else b.zh_block
+            text_len = len(b.en_block) + len(text_to_use)
             if current_batch and (len(current_batch) >= max_blocks or current_chars + text_len > max_chars):
                 self.pending_queue.append(current_batch)
                 current_batch = []
@@ -176,8 +183,8 @@ class Proofread2Workflow:
             "【输出要求】\n"
             "必须输出一个纯 JSON 列表，不要包含 Markdown。\n"
             "每个对象必须包含：BLOCK_ID / proofread_zh / proofread_note。\n"
-            "proofread_zh 必须给出\"最终二校译文\"（即使与一校相同也要完整输出），如果分段奇怪则可以合并到前一段译文，此处留空。\n"
-            "proofread_note 写修改原因及文中出现的术语；可以留空字符串。\n"
+            "proofread_zh 必须给出\"最终二校译文\"（即使与一校相同也要完整输出）。HTML 标签中的引号冲突必须对内部的引号进行转义。如果分段奇怪则可以合并到前一段译文，此处留空。\n"
+            "proofread_note 写修改原因及文中出现的术语；如果该段合并至前段，则在这里写出合并至前段。\n"
             "\n"
             "[\n"
             "  {\"BLOCK_ID\":\"...\",\"proofread_zh\":\"...\",\"proofread_note\":\"\"}\n"
@@ -201,15 +208,52 @@ class Proofread2Workflow:
                 return False, "返回的结果不是 JSON 数组", []
             if len(data) != len(batch):
                 return False, f"返回的数组长度 ({len(data)}) 与请求片段数量 ({len(batch)}) 不匹配", []
-            
+
             req_keys = [str(b.key) for b in batch]
             resp_keys = [str(item.get("BLOCK_ID")) for item in data]
             if set(req_keys) != set(resp_keys):
                 return False, f"返回的 BLOCK_ID {resp_keys} 与请求 {req_keys} 不匹配", []
-                
+
             return True, "Success", data
         except Exception as e:
-            return False, f"JSON 解析失败: {e}", []
+            # JSON 解析失败，尝试通过正则表达式提取数据
+            logger.warning(f"JSON 解析失败，尝试正则提取: {e}")
+            extracted_data = self._extract_data_from_text(text, batch)
+            if extracted_data:
+                logger.info(f"正则提取成功，提取到 {len(extracted_data)} 条数据")
+                return True, "Success (regex extracted)", extracted_data
+            
+            # 显示前 500 字符的 JSON 内容，帮助定位问题
+            preview = text[:500] + "..." if len(text) > 500 else text
+            error_msg = f"JSON 解析失败: {e}\n\n返回的 JSON 内容:\n{preview}"
+            return False, error_msg, []
+
+    def _extract_data_from_text(self, text: str, batch: List[TranslationBlock]) -> List[Dict]:
+        """当 JSON 解析失败时，通过正则表达式从文本中提取数据"""
+        result = []
+        req_keys = [str(b.key) for b in batch]
+        
+        # 尝试匹配每个 BLOCK_ID 对应的数据块
+        for block_id in req_keys:
+            # 构建正则表达式模式，匹配该 BLOCK_ID 对应的对象
+            # 匹配模式: "BLOCK_ID": "xxx" ... "proofread_zh": "..." ... "proofread_note": "..."
+            pattern = r'"BLOCK_ID"\s*:\s*"' + re.escape(block_id) + r'"[^}]*"proofread_zh"\s*:\s*"([^"]*)"[^}]*"proofread_note"\s*:\s*"([^"]*)"'
+            
+            match = re.search(pattern, text, re.DOTALL)
+            if match:
+                proofread_zh = match.group(1)
+                proofread_note = match.group(2)
+                result.append({
+                    "BLOCK_ID": block_id,
+                    "proofread_zh": proofread_zh,
+                    "proofread_note": proofread_note
+                })
+        
+        # 如果正则提取的数据数量与请求的不一致，返回空列表表示失败
+        if len(result) != len(batch):
+            return []
+        
+        return result
 
     def apply_batch(self, batch: List[TranslationBlock], data: List[Dict]):
         """将用户或 LLM 生成的校验数据应用到内存模型并持久化"""
@@ -281,7 +325,6 @@ class Proofread2Workflow:
         return result
     
     def _process_recursive(self, batch: List[TranslationBlock], depth: int = 0) -> List[TranslationBlock]:
-        """递归处理批次，包含失败重试和任务拆分机制"""
         if not batch:
             return batch
         
@@ -289,36 +332,28 @@ class Proofread2Workflow:
         
         for attempt in range(MAX_RETRIES):
             try:
-                # 构建 prompt
                 prompt = self.build_prompt_for_batch(batch)
-                
-                # 发送请求
                 response = self.request_llm(prompt)
-                
-                # 解析和验证结果
                 valid, msg, data = self.parse_and_validate(batch, response)
+                
                 if not valid:
-                    logger.error(f"[Depth={depth}] 批次处理失败: {msg}")
-                    # 标记批次中的所有块为错误
-                    for block in batch:
-                        block.proofread_note = f"ERROR: {msg}"
-                    return batch
+                    # 验证失败也视为一种需要重试的错误
+                    raise ValueError(f"AI返回数据验证失败: {msg}")
                 
-                # 应用结果
                 self.apply_batch(batch, data)
-                
                 return batch
                 
             except Exception as e:
-                # 致命错误直接熔断
                 if any(x in str(e) for x in ["HTTP 401", "HTTP 403", "insufficient_quota", "鉴权", "apiKey"]):
                     raise
                 
                 if attempt < MAX_RETRIES - 1:
-                    logger.warning(f"[Depth={depth}] 重试 {attempt+1}/{MAX_RETRIES}: {e}")
-                    time.sleep(2)
+                    # 关键修改：重试等待时间使用配置值
+                    retry_wait = self.runner.delay_seconds if self.runner.delay_seconds > 0 else 2
+                    logger.warning(f"[Depth={depth}] 二校请求失败，{retry_wait} 秒后重试: {e}")
+                    time.sleep(retry_wait)
                 else:
-                    logger.error(f"[Depth={depth}] 所有重试失败: {e}")
+                    logger.error(f"[Depth={depth}] 二校重试失败: {e}")
         
         # 拆分阶段：只有当重试彻底失败才会走到这里
         if len(batch) > 1:
