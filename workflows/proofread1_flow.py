@@ -235,19 +235,11 @@ class Proofread1Workflow:
 {content_str}
 
 【处理逻辑 - 请严格遵守】
-对于每一个 Block，请先判断其是否可以正常处理，并从以下两种模式中选择一种输出：
-
-模式 A：正常校对（绝大多数情况）
-- 适用场景：原文可读，且你能提供有效的校对建议。
+对于每一个 Block
 - proofread_zh：输出修正后的译文。
-- proofread_note：输出具体的修改原因（如：术语修正/语法优化/风格调整）。请不要写"无"、"没问题"，如果没有修改，请留空字符串。
+- proofread_note：输出具体的修改原因（如：术语修正/语法优化/风格调整）。如果没有修改，请留空字符串。
 - new_terms: 仅当该块中出现明确"专有名词/术语/人名/地名"且不在术语表内时才输出；否则 []。
   new_terms 每项必须是：{{'term': '英文术语', 'translation': '中文译名', 'note': '可选备注'}}
-
-模式 B：异常报错（极少数情况）
-- 适用场景：原文全是乱码、原文不仅是外语还是无法理解的字符。
-- proofread_zh：必须输出固定标签 "[BLOCK_ERROR]"。
-- proofread_note：必须说明无法处理的具体技术原因（如：GARBLED_TEXT, SAFETY_FILTER）。
 
 【输出格式】
 必须输出一个纯 JSON 列表，不要包含 Markdown 标记。
@@ -338,126 +330,4 @@ class Proofread1Workflow:
     
 
 
-    def _process_block(self, block: TranslationBlock) -> TranslationBlock:
-        """单块处理逻辑解耦，用于并发处理"""
-        if not block.en_block.strip():
-            block.stage = 1
-            return block
-            
-        # 系统提示
-        system_prompt = "你是一个严谨的本地化校对专家。你的任务是根据参考术语校对原文和译文。"
-        
-        # 为该块匹配术语（一校只使用旧术语）
-        block_old_hits, _ = match_terms_for_block(block, self.old_terms, self.new_terms)
-        
-        # 格式化术语
-        block_old_terms_str = format_terms(block_old_hits)
-        
-        # 构建一校 prompt
-        prompt = f"""
-【待处理内容】
---- BLOCK_ID: {block.key} ---
-原文: {block.en_block}
-原译文: {block.zh_block}
-参考术语: {block_old_terms_str}
-
-【处理逻辑 - 请严格遵守】
-对于每一个 Block，请先判断其是否可以正常处理，并从以下两种模式中选择一种输出：
-
-模式 A：正常校对（绝大多数情况）
-- 适用场景：原文可读，且你能提供有效的校对建议。
-- proofread_zh：输出修正后的译文。
-- proofread_note：输出具体的修改原因（如：术语修正/语法优化/风格调整）。请不要写"无"、"没问题"，如果没有修改，请留空字符串。
-- new_terms: 仅当该块中出现明确"专有名词/术语/人名/地名"且不在术语表内时才输出；否则 []。
-  new_terms 每项必须是：{{'term': '英文术语', 'translation': '中文译名', 'note': '可选备注'}}
-
-模式 B：异常报错（极少数情况）
-- 适用场景：原文全是乱码、原文不仅是外语还是无法理解的字符、或者内容违反安全策略。
-- proofread_zh：必须输出固定标签 "[BLOCK_ERROR]"。
-- proofread_note：必须说明无法处理的具体技术原因（如：GARBLED_TEXT, SAFETY_FILTER）。
-
-【输出格式】
-必须输出一个纯 JSON 列表，不要包含 Markdown 标记。
-[{{
-  "BLOCK_ID": "保持原样",
-  "proofread_zh": "修正后的译文 或 [BLOCK_ERROR]",
-  "proofread_note": "语言学备注 或 错误原因",
-  "new_terms": []
-}}]
-"""
-        
-        # 记录完整的 prompt 内容
-        logger.info(f"构建的完整 prompt: {prompt}")
-        
-        try:
-            response = self.llm_engine.request_prompt(prompt=prompt, system_prompt=system_prompt)
-            
-            # 简单清理可能的 markdown ```json 标记
-            json_str = re.sub(r'^```[jJ]son\s*', '', response.strip())
-            json_str = re.sub(r'\s*```$', '', json_str)
-            
-            try:
-                result_data = json.loads(json_str)
-                # 处理 JSON 列表
-                if isinstance(result_data, list) and len(result_data) > 0:
-                    item = result_data[0]
-                    block.proofread1_zh = item.get("proofread_zh", "")
-                    block.proofread1_note = item.get("proofread_note", "")
-                    # 处理新术语
-                    new_terms = item.get("new_terms", [])
-                    if isinstance(new_terms, list):
-                        block.new_terms = new_terms
-                        # 将新术语添加到术语表
-                        for term_data in new_terms:
-                            term = term_data.get("term", "").strip()
-                            translation = term_data.get("translation", "").strip()
-                            note = term_data.get("note", "").strip()
-                            if term and translation:
-                                # 检查是否已存在
-                                existing_terms = [t for t in self.new_terms.terms if t.term == term]
-                                if not existing_terms:
-                                    self.new_terms.terms.append(TermEntry(
-                                        term=term,
-                                        translation=translation,
-                                        note=note
-                                    ))
-                        # 重新构建 matcher
-                        self.new_terms._build_matchers()
-                else:
-                    # 处理单个 JSON 对象
-                    block.proofread1_zh = result_data.get("proofread_zh", "")
-                    block.proofread1_note = result_data.get("proofread_note", "")
-                    new_terms = result_data.get("new_terms", [])
-                    if isinstance(new_terms, list):
-                        block.new_terms = new_terms
-                        # 将新术语添加到术语表
-                        for term_data in new_terms:
-                            term = term_data.get("term", "").strip()
-                            translation = term_data.get("translation", "").strip()
-                            note = term_data.get("note", "").strip()
-                            if term and translation:
-                                # 检查是否已存在
-                                existing_terms = [t for t in self.new_terms.terms if t.term == term]
-                                if not existing_terms:
-                                    self.new_terms.terms.append(TermEntry(
-                                        term=term,
-                                        translation=translation,
-                                        note=note
-                                    ))
-                        # 重新构建 matcher
-                        self.new_terms._build_matchers()
-            except json.JSONDecodeError:
-                logger.warning(f"区块 [{block.key}] LLM 返回格式非严格 JSON，回退为纯文本。")
-                block.proofread1_zh = response
-                block.proofread1_note = "解析 JSON 失败"
-                
-            block.stage = 1  # 标记当前片段完成了一校
-            
-        except Exception as e:
-            logger.error(f"处理区块 [{block.key}] 时发生错误: {e}")
-            block.proofread1_note = f"ERROR: {str(e)}"
-            # 遇到明显的鉴权或配置错误时，抛出异常以中断整个批量任务
-            if "鉴权" in str(e) or "apiKey" in str(e):
-                raise e
-            
-        return block
+    

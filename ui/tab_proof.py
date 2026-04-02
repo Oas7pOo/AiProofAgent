@@ -100,13 +100,11 @@ class RunTab(ttk.Frame):
         self.btn_export_para_csv = ttk.Button(self.export_actions_fr, text="导出Paratranz CSV", command=self.export_para_csv)
         self.btn_export_md = ttk.Button(self.export_actions_fr, text="导出报告MD", command=self.export_report_md)
         self.btn_export_state = ttk.Button(self.export_actions_fr, text="导出内部状态JSON", command=self.export_state_json)
-        self.btn_export_js = ttk.Button(self.export_actions_fr, text="导出JS", command=self.export_js)
         self.btn_export_new_terms = ttk.Button(self.export_actions_fr, text="导出新术语", command=self.export_new_terms)
         self.btn_export_para_json.pack(side="left", padx=5, pady=8)
         self.btn_export_para_csv.pack(side="left", padx=5, pady=8)
         self.btn_export_md.pack(side="left", padx=5, pady=8)
         self.btn_export_state.pack(side="left", padx=5, pady=8)
-        self.btn_export_js.pack(side="left", padx=5, pady=8)
         self.btn_export_new_terms.pack(side="left", padx=5, pady=8)
 
         # 4. 控制
@@ -266,8 +264,6 @@ class RunTab(ttk.Frame):
             return out_dir, f"{base}_final.md", [("Markdown", "*.md")], ".md"
         if kind == "state_json":
             return out_dir, f"{base}_state.json", [("JSON", "*.json")], ".json"
-        if kind == "js":
-            return out_dir, f"{base}.js", [("JavaScript", "*.js")], ".js"
         if kind == "new_terms":
             return out_dir, f"{base}_new_terms.json", [("JSON", "*.json")], ".json"
         raise ValueError(f"unknown export kind: {kind}")
@@ -464,12 +460,10 @@ class RunTab(ttk.Frame):
             import csv
             with open(out_csv, 'w', encoding='utf-8', newline='') as f:
                 writer = csv.writer(f)
-                writer.writerow(["#正式使用时请删除前三行。Please remove the first 3 lines in production."])
-                writer.writerow(["#键值", "原文", "译文", "上下文（可选）"])
-                writer.writerow(["#Key", "Source", "Translation", "Context(optional)"])
+                # 直接写入数据，不添加注释行
                 for b in blocks:
                     translation = b.proofread_zh or b.proofread1_zh or b.zh_block or ""
-                    writer.writerow([b.key, b.en_block, translation, ""])
+                    writer.writerow([b.key, b.en_block, translation])
             messagebox.showinfo("成功", f"已导出 Paratranz CSV：\n{os.path.basename(out_csv)}")
         except Exception as e:
             messagebox.showerror("导出失败", str(e))
@@ -503,36 +497,20 @@ class RunTab(ttk.Frame):
 
         try:
             blocks, _, _ = FormatConverter.load_from_json(f_arc)
-            FormatConverter.save_to_json(blocks, out_state)
-            messagebox.showinfo("成功", f"已导出内部状态 JSON：\n{os.path.basename(out_state)}")
-        except Exception as e:
-            messagebox.showerror("导出失败", str(e))
-
-    def export_js(self):
-        err = self._ensure_can_export()
-        if err:
-            return messagebox.showwarning("提示", err)
-
-        f_arc = self.arc_var.get().strip()
-        out_js = self._ask_save_path("js")
-        if not out_js:
-            return
-
-        try:
-            blocks, _, _ = FormatConverter.load_from_json(f_arc)
-            js_data = []
-            for b in blocks:
-                translation = b.proofread_zh or b.proofread1_zh or b.zh_block or ""
-                js_data.append({
-                    "key": b.key,
-                    "original": b.en_block,
-                    "translation": translation,
-                    "stage": b.stage
+            # 构建简洁的导出格式
+            simple_data = []
+            for block in blocks:
+                simple_data.append({
+                    "key": block.key,
+                    "en_block": block.en_block,
+                    "zh_block": block.zh_block,
+                    "proofread1_zh": block.proofread1_zh,
+                    "proofread1_note": block.proofread1_note
                 })
-            js_content = f"const translations = {json.dumps(js_data, ensure_ascii=False, indent=2)};"
-            with open(out_js, 'w', encoding='utf-8') as f:
-                f.write(js_content)
-            messagebox.showinfo("成功", f"已导出 JS：\n{os.path.basename(out_js)}")
+            # 直接写入简洁格式
+            with open(out_state, 'w', encoding='utf-8') as f:
+                json.dump(simple_data, f, ensure_ascii=False, indent=2)
+            messagebox.showinfo("成功", f"已导出内部状态 JSON：\n{os.path.basename(out_state)}")
         except Exception as e:
             messagebox.showerror("导出失败", str(e))
 

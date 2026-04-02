@@ -162,16 +162,45 @@ class FormatConverter:
     def load_from_csv(file_path: str) -> List[TranslationBlock]:
         """
         从 CSV 文件加载数据，支持 Paratranz 格式和通用格式
+        支持 2-4 列的 CSV：
+        - 2列：key, 原文
+        - 3列：key, 原文, 译文
+        - 4列：key, 原文, 译文, 注释
+        支持混合格式：前几行可能只有2列（标题/前言），后面有3列（正文）
+        跳过以 # 开头的注释行
         """
         try:
             blocks = []
             with open(file_path, 'r', encoding='utf-8') as f:
-                reader = csv.DictReader(f)
+                # 直接使用 csv.reader 读取文件
+                reader = csv.reader(f)
+                
                 for i, row in enumerate(reader):
-                    # 支持多种 CSV 格式
-                    key = row.get('key', row.get('Key', str(i+1)))
-                    en_block = row.get('en', row.get('Source', row.get('original', '')))
-                    zh_block = row.get('zh', row.get('Translation', row.get('translation', '')))
+                    # 跳过空行
+                    if not row:
+                        continue
+                    
+                    # 检查第一列是否是注释
+                    if row[0].strip().startswith('#'):
+                        continue
+                    
+                    # 按列索引处理，支持混合格式
+                    key = str(i+1)  # 默认key
+                    en_block = ''
+                    zh_block = ''
+                    
+                    # 处理不同列数的行
+                    if len(row) >= 1:
+                        key = row[0].strip() or str(i+1)
+                    if len(row) >= 2:
+                        en_block = row[1].strip()
+                    if len(row) >= 3:
+                        zh_block = row[2].strip()
+                    # 第4列是注释，暂不处理
+                    
+                    # 跳过空内容的块
+                    if not en_block and not zh_block:
+                        continue
                     
                     block = TranslationBlock(
                         key=key,
@@ -179,6 +208,7 @@ class FormatConverter:
                         zh_block=zh_block
                     )
                     blocks.append(block)
+            
             logger.info(f"成功从 {file_path} 加载 {len(blocks)} 个数据块")
             return blocks
         except Exception as e:

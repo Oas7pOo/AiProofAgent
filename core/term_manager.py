@@ -1,77 +1,56 @@
-import json
-import csv
-import logging
-import re
+# core/term_manager.py 完整修复版
+import json, csv, logging, re
 from typing import List, Tuple, Any
 from models.term import TermEntry
 
 logger = logging.getLogger("AiProofAgent.TermManager")
 
 class TermManager:
-    """
-    负责管理术语表 (CSV/JSON)，从中解析为统一的 TermEntry 集合，
-    用作 LLM Prompt 的外部词汇注入依赖。
-    """
     def __init__(self):
         self.terms: List[TermEntry] = []
         self._matchers: List[Tuple[Any, TermEntry]] = []
-        
-        # 定义 OCR 混淆字符 (字符 -> 正则集合)
-        self.ocr_map = {
-            'l': '[lLiI1|!]', 'i': '[lLiI1|!]', '1': '[lLiI1|!]',
-            'o': '[oO0QD]',   '0': '[oO0QD]',
-            's': '[sS5$]',    '5': '[sS5$]',
-            'a': '[aA4@]',    'e': '[eE3]',
-            't': '[tT7]',     'b': '[bB8]',
-            'g': '[gG69]',    'z': '[zZ2]',
-            'c': '[cC(]',     '(': '[cC(]'
-        }
+        self.ocr_map = {'l': '[lLiI1|!]', 'i': '[lLiI1|!]', '1': '[lLiI1|!]', 'o': '[oO0QD]', '0': '[oO0QD]'}
 
     def load_terms(self, file_path: str):
-        if not file_path:
-            return
+        if not file_path: return
         try:
+            items = []
             if file_path.endswith('.json'):
                 with open(file_path, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    for item in data:
-                        self.terms.append(TermEntry(
-                            term=item.get("en", ""),
-                            translation=item.get("zh", ""),
-                            note=item.get("note", "")
-                        ))
+                    items = json.load(f)
             elif file_path.endswith('.csv'):
                 with open(file_path, 'r', encoding='utf-8') as f:
-                    reader = csv.DictReader(f)
-                    for row in reader:
-                        self.terms.append(TermEntry(
-                            term=row.get("en", ""),
-                            translation=row.get("zh", ""),
-                            note=row.get("note", "")
-                        ))
+                    items = list(csv.DictReader(f))
+
+            for item in items:
+                # 核心修复：兼容多种键名并去除空格
+                term_val = (item.get("term") or item.get("en") or "").strip()
+                trans_val = (item.get("translation") or item.get("zh") or "").strip()
+                note_val = (item.get("note") or "").strip()
+                
+                # 过滤掉不包含英文或数字的术语
+                if term_val and re.search(r'[a-zA-Z]', term_val):
+                    self.terms.append(TermEntry(term=term_val, translation=trans_val, note=note_val))
+            
             self._build_matchers()
-            logger.info(f"成功加载术语表: {file_path}，共 {len(self.terms)} 条记录")
+            logger.info(f"成功加载术语: {len(self.terms)} 条来自 {file_path}")
         except Exception as e:
-            logger.error(f"加载术语表失败: {e}", exc_info=True)
-            raise
+            logger.error(f"加载失败: {e}")
 
     def _build_matchers(self):
         self._matchers = []
         for entry in self.terms:
-            en = entry.term.strip()
-            if not en or not re.search(r'[a-zA-Z]', en):
-                continue
+            en = entry.term
+            if not en or not re.search(r'[a-zA-Z0-9]', en): continue
             try:
-                # 不管术语长短，都使用 OCR 混淆字符映射进行模糊匹配
-                core_chars = re.sub(r'[\s\W_]+', '', en)
-                regex_parts = [self.ocr_map.get(c.lower(), re.escape(c)) for c in core_chars]
-                pattern = r"[\s\W_]*".join(regex_parts)
-                self._matchers.append((re.compile(pattern, re.IGNORECASE), entry))
-            except Exception as e:
-                logger.warning(f"构建正则失败 '{en}': {e}")
-                
+                # 改进正则：允许术语内部有任意空白
+                regex_parts = [self.ocr_map.get(c.lower(), re.escape(c)) for c in en if not c.isspace()]
+                pattern = r"\s*".join(regex_parts)
+                # 加上单词边界，防止误伤（如 'Crypt' 匹配到 'Cryptography'）
+                self._matchers.append((re.compile(r'\b' + pattern + r'\b', re.IGNORECASE), entry))
+            except: continue
+
     def match_terms(self, text: str) -> List[TermEntry]:
-        """通过正则容错在文本中匹配出存在的术语"""
         if not text: return []
         hits = {}
         for regex, entry in self._matchers:

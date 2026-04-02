@@ -19,8 +19,8 @@ class LlmEngine:
             return default
 
         self.base_url = _get_val(["llm.base_url", "base_url"], "https://api.openai.com/v1")
-        self.model = _get_val(["model", "llm.model"], "gpt-3.5-turbo")
-        self.api_key = _get_val(["api_key", "llm.api_key"], "")
+        self.model = _get_val(["llm.model", "model"], "gpt-3.5-turbo")
+        self.api_key = _get_val(["llm.api_key", "api_key"], "")
         self.timeout = int(_get_val(["llm.timeout", "timeout"], 120))
 
         logger.info(f"LLM配置读取结果: URL={self.base_url}, Model={self.model}, Key已填入={'是' if self.api_key else '否'}")
@@ -52,9 +52,6 @@ class LlmEngine:
             base_url_clean = str(self.base_url or "").rstrip("/").strip('`')
             url = f"{base_url_clean}/chat/completions"
             logger.info(f"发送请求到: {url}")
-            
-            # 记录 prompt 内容
-            logger.info(f"发送的 prompt: {prompt}")
             
             # 发送请求
             response = self.session.post(
