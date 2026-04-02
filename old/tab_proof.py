@@ -7,15 +7,36 @@ import os
 import glob
 import json
 from datetime import datetime
-import logging
 
-from workflows.proofread1_flow import Proofread1Workflow
-from utils.config import ConfigManager
-from core.format_converter import FormatConverter
-from ui.gui_logger import setup_gui_logger
+from tools.proofread_service import ProofreadApp
+from ai.alignment_service import AlignmentService
+from utils.config_loader import load_config
+from tools.export_manager import ExportManager
 
 DEFAULT_DIR_NAME = "archives"
-logger = logging.getLogger("AiProofAgent.RunTab")
+
+
+class TextRedirector:
+    def __init__(self, widget):
+        self.widget = widget
+
+    def write(self, s):
+        try:
+            self.widget.after(0, self._append, s)
+        except Exception:
+            pass
+
+    def _append(self, s):
+        try:
+            self.widget.config(state="normal")
+            self.widget.insert(tk.END, s)
+            self.widget.see(tk.END)
+            self.widget.config(state="disabled")
+        except Exception:
+            pass
+
+    def flush(self):
+        pass
 
 
 class RunTab(ttk.Frame):
@@ -39,9 +60,6 @@ class RunTab(ttk.Frame):
             os.makedirs(DEFAULT_DIR_NAME)
 
         self.setup_ui()
-        
-        # 应用启动时自动扫描最近的存档
-        self._scan_latest_archive()
 
     def setup_ui(self):
         # 1. 模式
@@ -96,18 +114,12 @@ class RunTab(ttk.Frame):
 
         # 3. 导出按钮区（默认隐藏，任务完成后才显示）
         self.export_actions_fr = ttk.LabelFrame(self, text="导出（任务完成后可用）")
-        self.btn_export_para_json = ttk.Button(self.export_actions_fr, text="导出Paratranz JSON", command=self.export_para_json)
-        self.btn_export_para_csv = ttk.Button(self.export_actions_fr, text="导出Paratranz CSV", command=self.export_para_csv)
+        self.btn_export_final = ttk.Button(self.export_actions_fr, text="导出最终JSON", command=self.export_final_json)
         self.btn_export_md = ttk.Button(self.export_actions_fr, text="导出报告MD", command=self.export_report_md)
-        self.btn_export_state = ttk.Button(self.export_actions_fr, text="导出内部状态JSON", command=self.export_state_json)
-        self.btn_export_js = ttk.Button(self.export_actions_fr, text="导出JS", command=self.export_js)
-        self.btn_export_new_terms = ttk.Button(self.export_actions_fr, text="导出新术语", command=self.export_new_terms)
-        self.btn_export_para_json.pack(side="left", padx=5, pady=8)
-        self.btn_export_para_csv.pack(side="left", padx=5, pady=8)
+        self.btn_export_terms = ttk.Button(self.export_actions_fr, text="导出新术语JSON", command=self.export_terms_json)
+        self.btn_export_final.pack(side="left", padx=5, pady=8)
         self.btn_export_md.pack(side="left", padx=5, pady=8)
-        self.btn_export_state.pack(side="left", padx=5, pady=8)
-        self.btn_export_js.pack(side="left", padx=5, pady=8)
-        self.btn_export_new_terms.pack(side="left", padx=5, pady=8)
+        self.btn_export_terms.pack(side="left", padx=5, pady=8)
 
         # 4. 控制
         btn_fr = ttk.Frame(self, padding=(0, 10))
@@ -116,19 +128,12 @@ class RunTab(ttk.Frame):
         self.btn_start.pack(side="left", padx=5)
         self.btn_stop = ttk.Button(btn_fr, text="停止", command=self.stop, state="disabled")
         self.btn_stop.pack(side="left", padx=5)
-        
-        # 5. 进度显示
-        self.progress_var = tk.StringVar(value="")
-        progress_fr = ttk.LabelFrame(self, text="校对进度")
-        progress_fr.pack(fill="x", pady=5)
-        ttk.Label(progress_fr, textvariable=self.progress_var).pack(padx=10, pady=5, anchor="w")
 
         # 5. 日志（存起来，后面 pack(export) 需要 before=self.log_fr）
         self.log_fr = ttk.LabelFrame(self, text="日志")
         self.log_fr.pack(fill="both", expand=True, pady=5)
         self.log_text = scrolledtext.ScrolledText(self.log_fr, state="disabled", height=15)
         self.log_text.pack(fill="both", expand=True, padx=5, pady=5)
-        setup_gui_logger(self.log_text)
 
         # 初始化布局
         self._on_mode_change()
@@ -181,16 +186,15 @@ class RunTab(ttk.Frame):
             self.ent_out.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
             self.btn_out.config(
                 command=lambda: self._sel_file(
-                    self.ent_out, ["JSON", "*.json"],
+                    self.ent_out, [("JSON", "*.json")],
                     save=False, init_dir=DEFAULT_DIR_NAME
                 )
             )
             self.btn_out.grid(row=0, column=2, padx=5, pady=5)
 
-            # 从存档开始时不需要选择术语，因为术语已经包含在存档中
-            # self.lbl_term.grid(row=1, column=0, padx=5, pady=5, sticky="w")
-            # self.ent_term.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
-            # self.btn_term.grid(row=1, column=2, padx=5, pady=5)
+            self.lbl_term.grid(row=1, column=0, padx=5, pady=5, sticky="w")
+            self.ent_term.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
+            self.btn_term.grid(row=1, column=2, padx=5, pady=5)
 
             self._scan_latest_archive()
             self._refresh_export_visibility()
@@ -205,12 +209,7 @@ class RunTab(ttk.Frame):
         if not src:
             return
         base = os.path.splitext(os.path.basename(src))[0]
-        # 确保 archives 目录存在
-        if not os.path.exists(DEFAULT_DIR_NAME):
-            os.makedirs(DEFAULT_DIR_NAME)
-        # 使用相对路径，确保用户在选择文件夹时能看到存档文件
-        archive_path = os.path.join(DEFAULT_DIR_NAME, f"{base}.json")
-        self.arc_var.set(archive_path)
+        self.arc_var.set(os.path.abspath(os.path.join(DEFAULT_DIR_NAME, f"{base}.json")))
 
     def _scan_latest_archive(self):
         pat = os.path.join(DEFAULT_DIR_NAME, "*.json")
@@ -221,10 +220,8 @@ class RunTab(ttk.Frame):
         if not valid:
             return
         latest = max(valid, key=os.path.getmtime)
-        # 使用相对路径，确保用户在选择文件夹时能看到存档文件
-        relative_path = os.path.relpath(latest, os.getcwd())
-        self.arc_var.set(relative_path)
-        logger.info(f"[Auto] Loaded latest archive: {latest}")
+        self.arc_var.set(os.path.abspath(latest))
+        print(f"[Auto] Loaded latest: {latest}")
 
     def _sel_file(self, entry, types, save=False, init_dir=None):
         kw = {"filetypes": types}
@@ -258,17 +255,11 @@ class RunTab(ttk.Frame):
                   (os.path.dirname(os.path.abspath(f_arc)) if f_arc else "") or \
                   os.path.abspath(DEFAULT_DIR_NAME)
 
-        if kind == "para_json":
-            return out_dir, f"{base}_paratranz.json", [("JSON", "*.json")], ".json"
-        if kind == "para_csv":
-            return out_dir, f"{base}_paratranz.csv", [("CSV", "*.csv")], ".csv"
+        if kind == "final":
+            return out_dir, f"{base}_final.json", [("JSON", "*.json")], ".json"
         if kind == "md":
             return out_dir, f"{base}_final.md", [("Markdown", "*.md")], ".md"
-        if kind == "state_json":
-            return out_dir, f"{base}_state.json", [("JSON", "*.json")], ".json"
-        if kind == "js":
-            return out_dir, f"{base}.js", [("JavaScript", "*.js")], ".js"
-        if kind == "new_terms":
+        if kind == "terms":
             return out_dir, f"{base}_new_terms.json", [("JSON", "*.json")], ".json"
         raise ValueError(f"unknown export kind: {kind}")
 
@@ -328,42 +319,63 @@ class RunTab(ttk.Frame):
         self.btn_stop.config(state="disabled")
 
     def _bg_run(self, mode, f_src, f_arc, f_term):
-        workflow = Proofread1Workflow()
+        old_out = sys.stdout
+        sys.stdout = TextRedirector(self.log_text)
+        try:
+            print("=== 开始任务 ===")
+            cfg = load_config()
+            os.makedirs(os.path.dirname(os.path.abspath(f_arc)), exist_ok=True)
 
-        def _done_cb(blocks):
+            name = os.path.basename(f_arc).split(".")[0]
+            app = ProofreadApp(name, config=cfg)
+
+            if mode == "resume":
+                if not os.path.exists(f_arc):
+                    print(f"[ERROR] 存档不存在: {f_arc}")
+                    return
+                app.load_project_json(f_arc)
+            else:
+                print(f"[INFO] 导入数据: {f_src}")
+                if f_src.lower().endswith(".csv"):
+                    app.import_from_csv(f_src)
+                elif f_src.lower().endswith(".json"):
+                    app.import_from_json(f_src)
+                elif f_src.lower().endswith(".pdf"):
+                    app.import_from_pdf(f_src)
+                if os.path.exists(f_arc):
+                    print(f"[WARN] 覆盖存档: {f_arc}")
+
+            if f_term:
+                app.load_terms(f_term)
+
+            srv = AlignmentService(cfg)
+            w = cfg.get("ai_max_workers")
+
+            # 注意：必须等真正完成后才返回，否则会过早解锁导出
+            app.run_alignment_batch_threaded(srv, f_arc, w)
+
+            # 写“已完成标记”，用于 resume 时自动显示导出区
             self._mark_archive_completed(f_arc)
-            self.after(0, lambda: messagebox.showinfo("完成", "一校任务结束。可按需导出。"))
-            self.after(0, lambda: self._set_export_visible(True))
-            self.after(0, lambda: self.btn_start.config(state="normal"))
-            self.after(0, lambda: self.progress_var.set(""))
-            self.is_running = False
-            
-        def _err_cb(e):
-            self.after(0, lambda: messagebox.showerror("运行失败", str(e)))
-            self.after(0, lambda: self.btn_start.config(state="normal"))
-            self.after(0, lambda: self.progress_var.set(""))
-            self.is_running = False
-        
-        def _progress_cb(completed, total):
-            self.after(0, lambda: self.progress_var.set(f"校对进度: {completed}/{total}"))
 
-        is_pdf = (mode == "new" and f_src.lower().endswith(".pdf"))
-        file_path = f_src if mode == "new" else f_arc
-        
-        # 从存档开始时不需要传递术语文件路径，因为术语已经包含在存档中
-        old_terms_path = f_term if mode == "new" else ""
-        new_terms_path = "" if mode == "new" else ""
-        
-        workflow.execute_async(
-            file_path=file_path,
-            out_path=f_arc,
-            is_pdf=is_pdf,
-            old_terms_path=old_terms_path,
-            new_terms_path=new_terms_path,
-            progress_callback=_progress_cb,
-            done_callback=_done_cb,
-            error_callback=_err_cb
-        )
+            print("[INFO] 任务完成")
+
+            def _ui_done():
+                self._run_completed = True
+                self._set_export_visible(True)
+                messagebox.showinfo("完成", "任务结束。已显示三个导出按钮，可按需导出。")
+
+            self.after(0, _ui_done)
+
+        except Exception as e:
+            print(f"[ERROR] {e}")
+            import traceback
+            traceback.print_exc()
+            self.after(0, lambda: messagebox.showerror("运行失败", str(e)))
+        finally:
+            sys.stdout = old_out
+            self.after(0, lambda: self.btn_start.config(state="normal"))
+            self.after(0, lambda: self.btn_stop.config(state="disabled"))
+            self.is_running = False
 
     # ---------------- 完成标记 / 可见性 ----------------
 
@@ -426,51 +438,26 @@ class RunTab(ttk.Frame):
 
     # ---------------- 三个单独导出按钮（点击弹出另存为） ----------------
 
-    def export_para_json(self):
+    def export_final_json(self):
         err = self._ensure_can_export()
         if err:
             return messagebox.showwarning("提示", err)
 
         f_arc = self.arc_var.get().strip()
-        out_final = self._ask_save_path("para_json")
+        out_final = self._ask_save_path("final")
         if not out_final:
             return
 
         try:
-            blocks, _, _ = FormatConverter.load_from_json(f_arc)
-            paratranz_data = []
-            for b in blocks:
-                translation = b.proofread_zh or b.proofread1_zh or b.zh_block or ""
-                paratranz_data.append({
-                    "key": b.key,
-                    "original": b.en_block,
-                    "translation": translation,
-                    "stage": b.stage
-                })
-            with open(out_final, 'w', encoding='utf-8') as f:
-                json.dump(paratranz_data, f, ensure_ascii=False, indent=2)
-            messagebox.showinfo("成功", f"已导出 Paratranz JSON：\n{os.path.basename(out_final)}")
-        except Exception as e:
-            messagebox.showerror("导出失败", str(e))
-
-    def export_para_csv(self):
-        err = self._ensure_can_export()
-        if err: return messagebox.showwarning("提示", err)
-        f_arc = self.arc_var.get().strip()
-        out_csv = self._ask_save_path("para_csv")
-        if not out_csv: return
-        try:
-            blocks, _, _ = FormatConverter.load_from_json(f_arc)
-            import csv
-            with open(out_csv, 'w', encoding='utf-8', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow(["#正式使用时请删除前三行。Please remove the first 3 lines in production."])
-                writer.writerow(["#键值", "原文", "译文", "上下文（可选）"])
-                writer.writerow(["#Key", "Source", "Translation", "Context(optional)"])
-                for b in blocks:
-                    translation = b.proofread_zh or b.proofread1_zh or b.zh_block or ""
-                    writer.writerow([b.key, b.en_block, translation, ""])
-            messagebox.showinfo("成功", f"已导出 Paratranz CSV：\n{os.path.basename(out_csv)}")
+            exporter = ExportManager(
+                f_arc,
+                out_final_json=out_final,
+                out_md=None,
+                out_terms_json=None,
+                default_dir=DEFAULT_DIR_NAME,
+            )
+            files = exporter.export_all(export_final=True, export_md=False, export_terms=False)
+            messagebox.showinfo("成功", "已导出：\n" + "\n".join([os.path.basename(f) for f in files]))
         except Exception as e:
             messagebox.showerror("导出失败", str(e))
 
@@ -485,89 +472,37 @@ class RunTab(ttk.Frame):
             return
 
         try:
-            blocks, _, _ = FormatConverter.load_from_json(f_arc)
-            FormatConverter.export_to_markdown(blocks, out_md)
-            messagebox.showinfo("成功", f"已导出：\n{os.path.basename(out_md)}")
+            exporter = ExportManager(
+                f_arc,
+                out_final_json=None,
+                out_md=out_md,
+                out_terms_json=None,
+                default_dir=DEFAULT_DIR_NAME,
+            )
+            files = exporter.export_all(export_final=False, export_md=True, export_terms=False)
+            messagebox.showinfo("成功", "已导出：\n" + "\n".join([os.path.basename(f) for f in files]))
         except Exception as e:
             messagebox.showerror("导出失败", str(e))
 
-    def export_state_json(self):
+    def export_terms_json(self):
         err = self._ensure_can_export()
         if err:
             return messagebox.showwarning("提示", err)
 
         f_arc = self.arc_var.get().strip()
-        out_state = self._ask_save_path("state_json")
-        if not out_state:
-            return
-
-        try:
-            blocks, _, _ = FormatConverter.load_from_json(f_arc)
-            FormatConverter.save_to_json(blocks, out_state)
-            messagebox.showinfo("成功", f"已导出内部状态 JSON：\n{os.path.basename(out_state)}")
-        except Exception as e:
-            messagebox.showerror("导出失败", str(e))
-
-    def export_js(self):
-        err = self._ensure_can_export()
-        if err:
-            return messagebox.showwarning("提示", err)
-
-        f_arc = self.arc_var.get().strip()
-        out_js = self._ask_save_path("js")
-        if not out_js:
-            return
-
-        try:
-            blocks, _, _ = FormatConverter.load_from_json(f_arc)
-            js_data = []
-            for b in blocks:
-                translation = b.proofread_zh or b.proofread1_zh or b.zh_block or ""
-                js_data.append({
-                    "key": b.key,
-                    "original": b.en_block,
-                    "translation": translation,
-                    "stage": b.stage
-                })
-            js_content = f"const translations = {json.dumps(js_data, ensure_ascii=False, indent=2)};"
-            with open(out_js, 'w', encoding='utf-8') as f:
-                f.write(js_content)
-            messagebox.showinfo("成功", f"已导出 JS：\n{os.path.basename(out_js)}")
-        except Exception as e:
-            messagebox.showerror("导出失败", str(e))
-
-    def export_new_terms(self):
-        err = self._ensure_can_export()
-        if err:
-            return messagebox.showwarning("提示", err)
-
-        f_arc = self.arc_var.get().strip()
-        out_terms = self._ask_save_path("new_terms")
+        out_terms = self._ask_save_path("terms")
         if not out_terms:
             return
 
         try:
-            # 加载存档数据
-            with open(f_arc, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            
-            # 提取新术语
-            new_terms = []
-            if isinstance(data, dict):
-                terms = data.get("terms", {})
-                new_terms = terms.get("new_terms", [])
-            
-            # 去重
-            seen_terms = set()
-            unique_terms = []
-            for term in new_terms:
-                term_str = term.get("term", "").strip()
-                if term_str and term_str not in seen_terms:
-                    seen_terms.add(term_str)
-                    unique_terms.append(term)
-            
-            with open(out_terms, 'w', encoding='utf-8') as f:
-                json.dump(unique_terms, f, ensure_ascii=False, indent=2)
-            messagebox.showinfo("成功", f"已导出新术语：\n{os.path.basename(out_terms)}")
+            exporter = ExportManager(
+                f_arc,
+                out_final_json=None,
+                out_md=None,
+                out_terms_json=out_terms,
+                default_dir=DEFAULT_DIR_NAME,
+            )
+            files = exporter.export_all(export_final=False, export_md=False, export_terms=True)
+            messagebox.showinfo("成功", "已导出：\n" + "\n".join([os.path.basename(f) for f in files]))
         except Exception as e:
             messagebox.showerror("导出失败", str(e))

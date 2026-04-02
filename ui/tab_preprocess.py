@@ -3,33 +3,15 @@ from tkinter import ttk, filedialog, messagebox, scrolledtext
 import threading
 import os
 import sys
+import csv
+import json
 
 # 引入业务逻辑
-from tools.data_converter import DataConverter
-from utils.config_loader import load_config
-
-# === 工具类：重定向输出 ===
-class TextRedirector:
-    def __init__(self, widget):
-        self.widget = widget
-    
-    def write(self, str_val):
-        try:
-            self.widget.after(0, self._append_text, str_val)
-        except:
-            pass
-
-    def _append_text(self, str_val):
-        try:
-            self.widget.configure(state='normal')
-            self.widget.insert(tk.END, str_val)
-            self.widget.see(tk.END)
-            self.widget.configure(state='disabled')
-        except:
-            pass
-            
-    def flush(self):
-        pass
+from core.ocr_engine import PaddleOCREngine
+from core.format_converter import FormatConverter
+from utils.config import ConfigManager
+from ui.gui_logger import setup_gui_logger
+import logging
 
 class PreprocessTab(ttk.Frame):
     @staticmethod
@@ -61,7 +43,6 @@ class PreprocessTab(ttk.Frame):
         # === 状态变量 ===
         self.mode_var = tk.StringVar(value="pdf") 
         self.pdf_fmt_var = tk.StringVar(value="json")
-        self.conv_dir_var = tk.StringVar(value="csv2json")
         
         # [监听] PDF 输出格式变化 -> 自动更新输出后缀
         self.pdf_fmt_var.trace("w", self._auto_fill_pdf_output)
@@ -81,8 +62,8 @@ class PreprocessTab(ttk.Frame):
         mode_frame = ttk.LabelFrame(self.top_frame, text="工作模式")
         mode_frame.pack(fill='x', pady=(0, 10))
         
-        ttk.Radiobutton(mode_frame, text="PDF 提取模式 (PDF -> Output)", variable=self.mode_var, value="pdf", command=self._on_mode_change).pack(side='left', padx=20, pady=10)
-        ttk.Radiobutton(mode_frame, text="格式转换模式 (CSV <-> JSON)", variable=self.mode_var, value="convert", command=self._on_mode_change).pack(side='left', padx=20, pady=10)
+        ttk.Radiobutton(mode_frame, text="PDF 提取模式 (PDF -> JSON)", variable=self.mode_var, value="pdf", command=self._on_mode_change).pack(side='left', padx=20, pady=10)
+        ttk.Radiobutton(mode_frame, text="Paratranz 转换 (CSV <-> JSON)", variable=self.mode_var, value="convert", command=self._on_mode_change).pack(side='left', padx=20, pady=10)
 
         # 2. 动态内容容器
         self.container_pdf = ttk.Frame(self.top_frame)
@@ -98,6 +79,7 @@ class PreprocessTab(ttk.Frame):
         
         self.log_text = scrolledtext.ScrolledText(log_frame, state='disabled', height=10, font=('Consolas', 9))
         self.log_text.pack(fill='both', expand=True, padx=5, pady=5)
+        setup_gui_logger(self.log_text)
 
     def _init_pdf_ui(self):
         """初始化 PDF 模式界面"""
@@ -110,31 +92,31 @@ class PreprocessTab(ttk.Frame):
         ttk.Label(frame, text="输出格式:").grid(row=1, column=0, sticky='w', padx=10, pady=10)
         fmt_frame = ttk.Frame(frame)
         fmt_frame.grid(row=1, column=1, sticky='w')
-        ttk.Radiobutton(fmt_frame, text="JSON", variable=self.pdf_fmt_var, value="json").pack(side='left', padx=5)
-        ttk.Radiobutton(fmt_frame, text="CSV", variable=self.pdf_fmt_var, value="csv").pack(side='left', padx=5)
+        ttk.Radiobutton(fmt_frame, text="Paratranz JSON", variable=self.pdf_fmt_var, value="json").pack(side='left', padx=5)
+        ttk.Radiobutton(fmt_frame, text="Paratranz CSV", variable=self.pdf_fmt_var, value="csv").pack(side='left', padx=5)
         
-        self.pdf_out = self._create_file_row(frame, "输出路径:", 2, [("JSON", "*.json"), ("CSV", "*.csv")], is_save=True)
+        self.pdf_out = self._create_file_row(frame, "输出路径:", 2, [("Data Files", "*.json *.csv")], is_save=True)
 
-        self.btn_run_pdf = ttk.Button(frame, text="▶ 开始处理 (PDF -> Output)", command=self.run_pdf_task)
+        self.btn_run_pdf = ttk.Button(frame, text="▶ 开始提取 (PDF -> Paratranz)", command=self.run_pdf_task)
         self.btn_run_pdf.grid(row=3, column=1, pady=20, sticky='w')
 
     def _init_conv_ui(self):
-        """初始化 转换 模式界面"""
-        frame = ttk.LabelFrame(self.container_conv, text="格式转换设置")
+        frame = ttk.LabelFrame(self.container_conv, text="Paratranz 格式转换设置")
         frame.pack(fill='x', expand=True)
 
         ttk.Label(frame, text="转换方向:").grid(row=0, column=0, sticky='w', padx=10, pady=10)
         dir_frame = ttk.Frame(frame)
         dir_frame.grid(row=0, column=1, sticky='w')
-        self.rb_c2j = ttk.Radiobutton(dir_frame, text="CSV 转 JSON", variable=self.conv_dir_var, value="csv2json")
-        self.rb_c2j.pack(side='left', padx=5)
-        self.rb_j2c = ttk.Radiobutton(dir_frame, text="JSON 转 CSV", variable=self.conv_dir_var, value="json2csv")
-        self.rb_j2c.pack(side='left', padx=5)
+        self.conv_dir_var = tk.StringVar(value="csv2json")
+        ttk.Radiobutton(dir_frame, text="CSV 转 JSON", variable=self.conv_dir_var, value="csv2json").pack(side='left', padx=5)
+        ttk.Radiobutton(dir_frame, text="JSON 转 CSV", variable=self.conv_dir_var, value="json2csv").pack(side='left', padx=5)
 
         self.conv_in = self._create_file_row(frame, "输入文件:", 1, [("Data Files", "*.csv *.json")])
-        self.conv_in.trace("w", self._auto_fill_conv_output)
+        self.conv_in_var = self.conv_in  # 兼容
+        self.conv_in_var.trace("w", self._auto_fill_conv_output)
 
         self.conv_out = self._create_file_row(frame, "输出文件:", 2, [("Data Files", "*.csv *.json")], is_save=True)
+        self.conv_out_var = self.conv_out
 
         self.btn_run_conv = ttk.Button(frame, text="▶ 执行转换", command=self.run_convert_task)
         self.btn_run_conv.grid(row=3, column=1, pady=20, sticky='w')
@@ -149,7 +131,7 @@ class PreprocessTab(ttk.Frame):
         self.pdf_out.set(base_path + target_ext)
 
     def _auto_fill_conv_output(self, *args):
-        in_path = self.conv_in.get()
+        in_path = self.conv_in_var.get()
         if not in_path: return
         lower_path = in_path.lower()
         base_path = os.path.splitext(in_path)[0]
@@ -161,7 +143,7 @@ class PreprocessTab(ttk.Frame):
             self.conv_dir_var.set("json2csv")
             target_ext = ".csv"
         if target_ext:
-            self.conv_out.set(base_path + target_ext)
+            self.conv_out_var.set(base_path + target_ext)
 
     def _create_file_row(self, parent, label_text, row, file_types, is_save=False):
         ttk.Label(parent, text=label_text).grid(row=row, column=0, sticky='w', padx=10, pady=5)
@@ -193,7 +175,8 @@ class PreprocessTab(ttk.Frame):
     def _toggle_ui_state(self, is_running):
         state = 'disabled' if is_running else 'normal'
         self.btn_run_pdf.config(state=state)
-        self.btn_run_conv.config(state=state)
+        if hasattr(self, 'btn_run_conv'):
+            self.btn_run_conv.config(state=state)
         
         # 运行时清空日志并启用
         if is_running:
@@ -215,79 +198,98 @@ class PreprocessTab(ttk.Frame):
             p_out += expected_ext
             self.pdf_out.set(p_out)
 
-        cfg = load_config()
-        
         def _task():
-            # 劫持标准输出
-            old_stdout = sys.stdout
-            sys.stdout = TextRedirector(self.log_text)
+            logger = logging.getLogger("AiProofAgent.Preprocess")
             
             try:
-                print(f"=== 开始 PDF 任务 ===")
-                print(f"输入: {p_in}")
-                print(f"正在初始化 OCR 引擎...")
+                logger.info("=== 开始 PDF 任务 ===")
+                logger.info(f"输入: {p_in}")
+                logger.info("正在初始化 OCR 引擎...")
                 
-                converter = DataConverter(cfg)
-                count = converter.pdf_to_file(p_in, p_out, fmt)
+                ocr_engine = PaddleOCREngine()
+                blocks = ocr_engine.process_pdf(p_in)
                 
-                print(f"=== 任务完成 ===")
-                print(f"共提取: {count} 条数据")
-                print(f"已保存: {p_out}")
-                messagebox.showinfo("完成", f"PDF 提取成功！\n共 {count} 条")
+                if fmt == "json":
+                    out_data = [{"key": b.key, "original": b.en_block, "translation": "", "context": ""} for b in blocks]
+                    with open(p_out, 'w', encoding='utf-8') as f:
+                        json.dump(out_data, f, ensure_ascii=False, indent=2)
+                else:
+                    with open(p_out, 'w', encoding='utf-8', newline='') as f:
+                        writer = csv.writer(f)
+                        writer.writerow(["#正式使用时请删除前三行。Please remove the first 3 lines in production."])
+                        writer.writerow(["#键值", "原文", "译文", "上下文（可选）"])
+                        writer.writerow(["#Key", "Source", "Translation", "Context(optional)"])
+                        for b in blocks:
+                            writer.writerow([b.key, b.en_block, "", ""])
+                
+                logger.info("=== 任务完成 ===")
+                logger.info(f"共提取: {len(blocks)} 个块")
+                logger.info(f"已保存: {p_out}")
+                self.after(0, lambda: messagebox.showinfo("完成", f"PDF 提取成功！\n共提取 {len(blocks)} 个块。"))
                 
             except Exception as e:
-                print(f"[ERROR] {e}")
-                import traceback
-                traceback.print_exc()
-                messagebox.showerror("错误", f"处理失败:\n{str(e)}")
+                logger.error(f"处理失败: {e}", exc_info=True)
+                self.after(0, lambda: messagebox.showerror("错误", f"处理失败:\n{str(e)}"))
             finally:
-                sys.stdout = old_stdout
                 self.after(0, lambda: self._toggle_ui_state(False))
         
         self._toggle_ui_state(True)
         threading.Thread(target=_task, daemon=True).start()
 
     def run_convert_task(self):
-        f_in = self.conv_in.get().strip()
-        f_out = self.conv_out.get().strip()
+        f_in = self.conv_in_var.get().strip()
+        f_out = self.conv_out_var.get().strip()
         direction = self.conv_dir_var.get()
 
         if not f_in or not f_out:
-            messagebox.showwarning("提示", "请完整选择输入和输出路径")
-            return
-
-        target_ext = ".json" if direction == "csv2json" else ".csv"
-        if not f_out.lower().endswith(target_ext):
-            f_out += target_ext
-            self.conv_out.set(f_out)
+            return messagebox.showwarning("提示", "请完整选择输入和输出路径")
 
         def _task():
-            old_stdout = sys.stdout
-            sys.stdout = TextRedirector(self.log_text)
-            
+            logger = logging.getLogger("AiProofAgent.Preprocess")
             try:
-                print(f"=== 开始格式转换 ===")
-                print(f"输入: {f_in}")
-                
-                converter = DataConverter()
-                count = 0
+                logger.info("=== 开始 Paratranz 格式转换 ===")
                 if direction == "csv2json":
-                    if not f_in.lower().endswith('.csv'): raise ValueError("输入文件必须是 CSV")
-                    count = converter.csv_to_json(f_in, f_out)
+                    with open(f_in, 'r', encoding='utf-8') as f:
+                        lines = f.readlines()
+                    data_lines = [l for l in lines if not l.startswith('#')]
+                    reader = csv.reader(data_lines)
+                    out = []
+                    for r in reader:
+                        if len(r) >= 2:
+                            out.append({
+                                "key": r[0],
+                                "original": r[1],
+                                "translation": r[2] if len(r) > 2 else "",
+                                "context": r[3] if len(r) > 3 else ""
+                            })
+                    
+                    with open(f_out, 'w', encoding='utf-8') as f:
+                        json.dump(out, f, ensure_ascii=False, indent=2)
+                    count = len(out)
                 else:
-                    if not f_in.lower().endswith('.json'): raise ValueError("输入文件必须是 JSON")
-                    count = converter.json_to_csv(f_in, f_out)
+                    with open(f_in, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    with open(f_out, 'w', encoding='utf-8', newline='') as f:
+                        writer = csv.writer(f)
+                        writer.writerow(["#正式使用时请删除前三行。Please remove the first 3 lines in production."])
+                        writer.writerow(["#键值", "原文", "译文", "上下文（可选）"])
+                        writer.writerow(["#Key", "Source", "Translation", "Context(optional)"])
+                        count = 0
+                        for item in data:
+                            # 兼容内部模型(en_block/proofread_zh)和Paratranz模型(original/translation)
+                            key = item.get("key", "")
+                            original = item.get("original", item.get("en_block", ""))
+                            translation = item.get("translation", item.get("proofread_zh", item.get("proofread1_zh", item.get("zh_block", ""))))
+                            context = item.get("context", "")
+                            writer.writerow([key, original, translation, context])
+                            count += 1
                 
-                print(f"=== 转换完成 ===")
-                print(f"处理数据: {count} 条")
-                print(f"输出路径: {f_out}")
-                messagebox.showinfo("完成", f"转换成功！\n处理: {count} 条")
-                
+                logger.info(f"转换完成，共处理 {count} 条数据，输出至 {f_out}")
+                self.after(0, lambda: messagebox.showinfo("完成", f"转换成功！\n处理: {count} 条"))
             except Exception as e:
-                print(f"[ERROR] {e}")
-                messagebox.showerror("错误", f"转换失败:\n{str(e)}")
+                logger.error(f"转换失败: {e}", exc_info=True)
+                self.after(0, lambda: messagebox.showerror("错误", f"转换失败:\n{str(e)}"))
             finally:
-                sys.stdout = old_stdout
                 self.after(0, lambda: self._toggle_ui_state(False))
 
         self._toggle_ui_state(True)

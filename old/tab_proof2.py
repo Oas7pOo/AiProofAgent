@@ -1,13 +1,14 @@
+# ui/tab_proof2.py
 import os
 import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
-import logging
-import json
 
-from utils.config import ConfigManager
-from workflows.proofread2_flow import Proofread2Workflow
-from core.format_converter import FormatConverter
+from ..utils.config_loader import load_config
+from ..ai.alignment_service import AlignmentService  # 复用 align_batch 的请求/解析方式 :contentReference[oaicite:8]{index=8}
+from ..tools.export_manager import ExportManager
+from ..tools.proofread2_service import Proofread2Project, find_latest_proof2_archive
+
 
 DEFAULT_DIR_NAME = "archives"
 
@@ -41,7 +42,8 @@ class Proof2Tab(ttk.Frame):
 
         # ---------------- state ----------------
         self.cfg = None
-        self.workflow: Proofread2Workflow = None
+        self.srv: AlignmentService = None
+        self.project: Proofread2Project = None
 
         self.archive_path = None
         self.batch_queue = []  # List[List[Proof2Item]]
@@ -211,8 +213,8 @@ class Proof2Tab(ttk.Frame):
         - 续校：自动加载最近二校存档；构建待处理批次并显示 prompt
         """
         try:
-            self.cfg = ConfigManager().data
-            self.workflow = Proofread2Workflow()
+            self.cfg = load_config()
+            self.srv = AlignmentService(self.cfg)
 
             mode = self.mode_var.get()
             arc = self.arc_path_var.get().strip()
@@ -221,7 +223,9 @@ class Proof2Tab(ttk.Frame):
                 if not arc or not os.path.exists(arc):
                     raise ValueError("续校模式：二校存档不存在。")
                 self.archive_path = arc
-                self.workflow.load_archive(arc)
+                name = os.path.splitext(os.path.basename(arc))[0]
+                self.project = Proofread2Project(name)
+                self.project.load_archive(arc)
             else:
                 stage1 = self.stage1_path.get().strip()
                 old_terms = self.old_terms_path.get().strip()
@@ -236,16 +240,17 @@ class Proof2Tab(ttk.Frame):
 
                 os.makedirs(os.path.dirname(os.path.abspath(arc)), exist_ok=True)
 
+                name = os.path.splitext(os.path.basename(arc))[0]
                 self.archive_path = arc
+                self.project = Proofread2Project(name)
 
-                self.workflow.load_stage1(stage1)
-                self.workflow.load_terms_old(old_terms)
-                if new_terms:
-                    self.workflow.load_terms_new(new_terms)
+                self.project.import_from_stage1_any(stage1)
+                self.project.load_terms_old(old_terms)
+                self.project.load_terms_new_optional(new_terms if new_terms else None)
 
                 # 初始落盘（存档自包含）
-                self.workflow.project.run_status = {"proofread2_completed": False}
-                self.workflow.project.save_archive(arc)
+                self.project.run_status = {"proofread2_completed": False}
+                self.project.save_archive(arc)
 
             self._rebuild_batches_and_show_first()
 
@@ -253,19 +258,19 @@ class Proof2Tab(ttk.Frame):
             messagebox.showerror("开始失败", str(e))
 
     def _rebuild_batches_and_show_first(self):
-        if not self.workflow:
+        if not self.project:
             return
 
         max_blocks = int(self.cfg.get("max_blocks", 5))
         max_chars = int(self.cfg.get("max_chars", 6000))
 
-        self.batch_queue = self.workflow.project.build_batches(max_blocks=max_blocks, max_chars=max_chars)
+        self.batch_queue = self.project.build_batches(max_blocks=max_blocks, max_chars=max_chars)
 
         if not self.batch_queue:
             # 已完成
-            self.workflow.project.mark_completed()
+            self.project.mark_completed()
             if self.archive_path:
-                self.workflow.project.save_archive(self.archive_path)
+                self.project.save_archive(self.archive_path)
             self.status_var.set("已完成（无待二校项）")
             self._set_export_enabled(True)
             self._set_ui_ready(False)
@@ -280,17 +285,17 @@ class Proof2Tab(ttk.Frame):
 
     def _show_current_batch(self):
         if not self.batch_queue:
-            self.workflow.project.mark_completed()
+            self.project.mark_completed()
             if self.archive_path:
-                self.workflow.project.save_archive(self.archive_path)
+                self.project.save_archive(self.archive_path)
             self.status_var.set("已完成（全部二校完成）")
             self._set_export_enabled(True)
             self._set_ui_ready(False)
             return
 
         batch = self.batch_queue[0]
-        old_hits, new_hits = self.workflow.project.match_terms_for_batch(batch)
-        prompt = self.workflow.project.build_prompt(batch, old_hits, new_hits)
+        old_hits, new_hits = self.project.match_terms_for_batch(batch)
+        prompt = self.project.build_prompt(batch, old_hits, new_hits)
 
         self._set_prompt_text(prompt)
         self._set_resp_text("")
@@ -299,7 +304,7 @@ class Proof2Tab(ttk.Frame):
     def on_auto(self):
         if self.auto_running:
             return
-        if not self.workflow or not self.batch_queue:
+        if not self.project or not self.batch_queue:
             messagebox.showwarning("提示", "请先点击“开始校对”加载项目。")
             return
 
@@ -311,7 +316,7 @@ class Proof2Tab(ttk.Frame):
         t.start()
 
     def on_batch(self):
-        if not self.workflow or not self.batch_queue:
+        if not self.project or not self.batch_queue:
             messagebox.showwarning("提示", "请先点击“开始校对”加载项目。")
             return
 
@@ -335,9 +340,10 @@ class Proof2Tab(ttk.Frame):
                 def update_progress(processed, total):
                     self.after(0, lambda: self.status_var.set(f"批量校对中: {processed}/{total} 批次"))
                 
-                # 调用 Proofread2Workflow 的 run 方法
-                self.workflow.run(
-                    out_path=self.archive_path,
+                # 调用 Proofread2Project 的 run_batches_threaded 方法
+                self.project.run_batches_threaded(
+                    self.srv,
+                    self.archive_path,
                     max_workers=max_workers,
                     progress_callback=update_progress
                 )
@@ -457,7 +463,7 @@ class Proof2Tab(ttk.Frame):
         return False
 
     def on_apply(self):
-        if not self.workflow or not self.batch_queue:
+        if not self.project or not self.batch_queue:
             return
 
         raw = self.txt_resp.get("1.0", tk.END).strip()
@@ -466,14 +472,14 @@ class Proof2Tab(ttk.Frame):
             return
 
         batch = self.batch_queue[0]
-        parsed = self.workflow.llm.client.parser.clean_and_parse_batch_json(raw)
-        ok, msg = self.workflow.project.validate_results(batch, parsed)
+        parsed = self.srv.parser.clean_and_parse_batch_json(raw)
+        ok, msg = self.project.validate_results(batch, parsed)
         if not ok:
             messagebox.showerror("应用失败", msg)
             return
 
-        self.workflow.project.apply_results(parsed)
-        self.workflow.project.save_archive(self.archive_path)
+        self.project.apply_results(parsed)
+        self.project.save_archive(self.archive_path)
 
         self.batch_queue.pop(0)
         self._show_current_batch()
@@ -481,9 +487,9 @@ class Proof2Tab(ttk.Frame):
     # ================= export =================
 
     def _ensure_completed(self):
-        if not self.workflow:
+        if not self.project:
             raise ValueError("未加载二校项目。")
-        if not self.workflow.project.is_completed():
+        if not self.project.is_completed():
             raise ValueError("二校尚未完成，不能导出。")
 
     def on_export_json(self):
