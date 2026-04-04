@@ -1,233 +1,158 @@
 # AiProofAgent
 
-**AI 驱动的翻译校对与 OCR 处理工具**
+**AI 驱动的专业级翻译校对与 OCR 文档处理工具**
 
-一个功能强大、易用的翻译校对和 PDF OCR 处理工具，专为文档本地化和翻译质量提升而设计。
+`AiProofAgent` 是一款专为文档本地化、游戏翻译审校及专业学术文档转换设计的重型武器。它深度整合了 **PaddleOCR-VL-1.5** 的版面分析能力与 **DeepSeek/OpenAI/Claude** 等顶级大语言模型的推理能力，为用户提供从原始 PDF 结构化提取到全自动 AI 审校，再到专业级文档导出的全生命周期解决方案。
 
-## 🚀 功能亮点
+在本地化翻译领域，传统的 OCR 提取往往会导致排版错乱、术语丢失。`AiProofAgent` 的出现正是为了解决这些痛点，让译者能从繁琐的格式调整中解放，专注于内容的打磨。
 
-### 核心功能
-- **PDF 转文本**：使用 OCR 技术将 PDF 文档转换为可编辑的文本格式
-- **AI 翻译校对**：集成 DeepSeek 等 AI 模型进行专业级翻译校对
-- **术语管理**：自动提取、管理和应用专业术语
-- **多格式转换**：支持 JSON、CSV 等格式之间的无缝转换
-- **双界面支持**：同时提供直观的图形界面 (GUI) 和高效的命令行界面 (CLI)
+> [!IMPORTANT] **版本更新说明：推荐使用** **`test`** **分支** 当前 `test` 分支已经过深度重构，支持文字版与图片扫描版 PDF 的完美解析。它不仅优化了 Paratranz 平台的直入直出体验，还引入了全新的多线程并发调度算法，是追求极致效率用户的首选。
 
-### 技术特性
-- **智能 AI 集成**：利用最新的 AI 模型提高翻译质量
-- **精准 OCR 识别**：使用 PaddleOCR API 进行高质量文档识别
-- **高效多线程**：支持多线程处理，大幅提高工作效率
-- **灵活配置**：通过 YAML 配置文件轻松管理系统设置
-- **完善的错误处理**：详细的错误信息和日志记录，让问题排查更简单
+## ✨ 核心优势与亮点
 
-## 📁 项目结构
+### 1. 卓越的 PDF 感知与解析 (文字/扫描版全覆盖)
+
+- **全能解析引擎**：无论是原生导出的文字版 PDF，还是清晰度欠佳的图片扫描版，系统均能通过高度优化的 OCR 管道进行还原。
+- **极速识别体验**：利用 PaddleOCR-VL-1.5 的高性能推理，系统能以秒级速度完成单页解析。这种快速的预处理能力为后续的 AI 大规模处理夯实了基础。
+- **完美表格与结构还原**：支持复杂表格（包括极难处理的**跨页表格**）的自动识别、合并与 Markdown 化。系统能敏锐捕捉文档的分级标题结构，确保提取后的内容逻辑清晰，不再是散乱的文本块。
+
+### 2. Paratranz 平台生态深度集成
+
+- **直入直出，无缝对接**：深度支持 Paratranz 翻译平台的标准 JSON/CSV 格式。用户可以直接将平台导出的待译文件导入本工具进行 AI 处理，完成后直接写回原格式上传。
+- **“翻译+校对”一条龙**：本工具不仅是简单的校对器，更是一个完整的翻译中转站。通过一校（初步翻译/术语提取）和二校（精修/润色）的组合，极大地优化了本地化流水线。
+
+### 3. “奇迹般”的并发处理性能
+
+- **高并发秒级响应**：通过自研的 `BatchTaskRunner` 并发架构，系统可以同时调度多个 AI 进程。
+- **效率奇迹**：在合理配置 API 并发数的情况下，**仅需约一分钟即可完成一本 400 页书籍的 AI 二校任务**。
+- **成本参考**：这种极速体验在带来巨大生产力提升的同时，成本也相当亲民（整个流程处理 400 页的书籍约需 160 元左右的 Token 费用，远低于人工校对的成本与时间支出）。
+
+### 4. 专业级文档导出 (DOC/Docx)
+
+- **结构化映射**：导出的 Word 文档不再是扁平的文字，而是完整保留了**分级标题**。
+- **表格支持**：对表格的支持达到了工业级水准，复杂表项在导出后依然保持良好的可读性与编辑性。
+- **体验升级**：致力于提供“最舒服”的导出体验，让技术产物直接转化为可以直接提交给客户的专业报告。
+
+## 🏗️ 系统架构
+
+项目采用**分层架构设计**，确保核心逻辑与界面解耦，方便开发者进行二次开发或 API 反代：
 
 ```
 AiProofAgent/
-├── ai/                 # AI 相关功能模块
-│   ├── __init__.py
-│   └── alignment_service.py  # 对齐服务实现
-├── cli/                # 命令行界面
-│   ├── __init__.py
-│   └── cli_handler.py  # 命令行处理逻辑
-├── tools/              # 核心工具模块
-│   ├── __init__.py
-│   ├── data_converter.py      # 数据格式转换
-│   ├── export_manager.py      # 导出管理
-│   ├── io_utils.py            # IO 工具函数
-│   ├── ocr_client.py          # OCR 客户端
-│   ├── proofread_service.py   # 校对服务
-│   └── proofread2_service.py  # 二校服务
-├── ui/                 # 图形用户界面
-│   ├── __init__.py
-│   ├── gui_app.py      # 主 GUI 应用
-│   ├── tab_preprocess.py  # 预处理标签页
-│   ├── tab_proof.py    # 校对标签页
-│   ├── tab_proof2.py   # 二校标签页
-│   └── tab_settings.py # 设置标签页
-├── utils/              # 工具函数
-│   ├── __init__.py
-│   └── config_loader.py  # 配置加载器
-├── config.yaml         # 配置文件
-├── main.py             # 主入口文件
-├── README.md           # 项目说明
-└── .gitignore          # Git 忽略文件
+├── models/               # 【数据模型层】定义统一的 DTO (TranslationBlock)，贯穿全生命周期
+├── core/                 # 【核心引擎层】
+│   ├── ocr_engine.py     # PaddleOCR 请求、自适应重试与 Markdown 分段逻辑
+│   ├── llm_engine.py     # OpenAI 兼容接口封装，支持多种模型协议
+│   ├── md2doc.py         # 核心转换逻辑：Markdown 标签精准映射至 Word 样式
+│   ├── term_manager.py   # 术语模糊匹配引擎，解决 OCR 混淆字符问题
+│   └── format_converter.py # 负责 Paratranz、JSON、CSV、JS 等格式的序列化
+├── workflows/            # 【业务工作流】
+│   ├── proofread1_flow.py# 一校自动化逻辑：负责大规模初译与术语发现
+│   └── proofread2_flow.py# 二校交互式逻辑：支持断点续传与人工/AI 混合微调
+├── ui/                   # 【表现层】基于 Tkinter 的响应式多标签页界面
+├── utils/                # 【基础设施层】配置管理、自动化日志与错误处理
+└── config.yaml           # 全局配置文件
+
 ```
 
-## 🛠️ 安装与配置
+## 📦 快速开始
 
-### 系统要求
-- Python 3.8 或更高版本
-- 稳定的网络连接（用于 AI 和 OCR API 调用）
+### 环境要求
 
-### 安装依赖
+- Python 3.9+
+- 依赖库：`pip install pandas requests pyyaml PyPDF2 python-docx beautifulsoup4`
 
-```bash
-# 安装必要的依赖包
-pip install pandas requests pyyaml
+### 配置设置
 
-# 克隆项目代码
-git clone https://github.com/Oas7pOo/AiProofAgent.git
-cd AiProofAgent
+新建/编辑根目录下的 `config.yaml`：
+
 ```
-
-### 配置文件设置
-
-编辑 `config.yaml` 文件，填写你的 API 密钥和配置信息：
-
-```yaml
-# AI 配置
-api_key: 你的 API 密钥  # 从 https://platform.iflow.cn 获取
-base_url: https://apis.iflow.cn/v1
-model: deepseek-v3.2
-
-# OCR 配置
+llm:
+  ai_max_workers: 1 # 并发数 (根据 API 限制调整)
+  api_key: "你的 API Key"
+  base_url: "兼容 OpenAI 格式"
+  max_blocks: 12 # 单次请求包含的数据块数量
+  max_chars: 8000 # 单次请求最大字符预算
+  model: "使用的模型"
+  time_wait: 60 # 批次间冷却时间 (秒)
+  timeout: 600
 ocr:
   api_url: https://ych83fn6yaveg1y3.aistudio-app.com/layout-parsing
-  token: 你的 OCR API 令牌
-
-# 性能配置
-ai_max_workers: 1  # 根据你的 CPU 核心数调整
-max_blocks: 10
-max_chars: 8000
-time_wait: 10
-timeout: 600
+  extra:
+    max_num_input_imgs: null
+  max_batch_pages: 90
+  max_retries: 3
+  mergeTables: true
+  min_batch_pages: 10
+  prettifyMarkdown: true
+  relevelTitles: true
+  restructurePages: true
+  retry_interval: 30
+  step_pages: 10
+  timeout: 600
+  token: "你的 OCR Token"
+  useChartRecognition: false
+  useDocOrientationClassify: false
+  useDocUnwarping: false
+  useLayoutDetection: true
+  visualize: false
 ```
 
-## 🎯 使用方法
+## 🚀 核心使用流程
 
-### 图形界面模式（推荐）
+### 阶段一：预处理 (PDF -> JSON)
 
-直接运行主程序，默认启动 GUI 模式：
+1. 在“预处理”标签页上传 PDF。无论是扫描件还是文字版，系统都会调用 OCR api进行解析。
+2. 开启版面分析功能，系统将输出带页码、带块序号的结构化 JSON。这是后续所有校对任务的“底片”。
 
-```bash
-python main.py
+### 阶段二：AI 一校 (翻译 + 术语匹配)
 
-# 或者显式指定 GUI 模式
-python main.py --gui
-```
+1. 载入原始（CSV/JSON）。如果已有术语表（JSON），一并载入。
+2. **术语提取模式**：一校不仅能进行初步翻译，还能利用 AI 自动抓取文中出现的专有名词、地名、人名，并生成术语建议。
+3. 导出专用于paratranslate平台的文件，用于人工校对的doc文档，支持后续二校的json文件和新术语表json文件
 
-GUI 界面包含四个主要标签页：
+### 阶段三：AI 二校 (精修润色)
 
-1. **预处理**：上传和处理 PDF 文件，转换为可编辑格式
-2. **AI 校对**：执行 AI 辅助的翻译校对任务
-3. **二校**：基于一校结果进行最终校对
-4. **设置**：配置系统参数和 API 密钥
+1. 载入一校json文件。在二校阶段，可以开启多并发校对。
+2. **交互式校验**：二校支持在 GUI 界面中实时查看 AI 的校对理由。你可以使用网页版的 ChatGPT、Claude 或 Gemini 配合进行人工/AI 协同审校。
+3. **高效产出**：通过设置并发数，实现对整本书的快速润色。
+4. 导出专用于paratranslate平台的文件，用于人工校对的doc文档，和原始json文件
 
-### 命令行模式
+### 阶段四：导出最终文档
 
-命令行模式适合自动化脚本和批处理操作：
+1. 点击“导出 DOC”或“导出报告”。
+2. 系统将生成的 Markdown 流转换为带有分级标题、样式规范、表格完整的 Word 文件。
 
-```bash
-# 查看帮助信息
-python main.py --help
+## 🛠️ 技术深度解析
 
-# 基本用法示例
-python main.py \
-  --archive "我的项目" \
-  --in-pdf "文档.pdf" \
-  --out-json "output.json" \
-  --terms "术语表.csv" \
-  --run-ai
-```
+1. **递归任务拆分算法**：当 AI 响应超时或格式错误时，系统会自动启动递归机制，将当前批次对半拆分并重新请求，直至每一行数据都得到处理。
+2. **术语鲁棒性 (Fuzzy Term Matching)**：针对 OCR 将 "Sword" 误识别为 "Sw0rd" 等常见问题，内置模糊匹配算法，确保术语一致性检查依然有效。
+3. **多并发冷却机制**：为了应对昂贵且限制 QPS 的顶级 API，系统内置了智能冷却等待功能，在最大化并发的同时避免被封禁 API Key。
 
-### 常见操作示例
+## 📦 安装与平台支持
 
-#### 1. PDF 转 JSON（使用 OCR）
+- **Windows**: 针对普通用户，后续我们将提供一键打包的 `.exe` 程序，免去配置 Python 环境的烦恼。
+- **Linux/Server**: 推荐开发者克隆 `test` 分支进行编译。你可以通过反代 API 或部署私有模型来实现更深层次的定制化翻译。
+- **依赖环境**: Python 3.9+，建议安装 `PyPDF2`、`python-docx` 等库。具体参考 `pip install -r requirements.txt` (如有)。
 
-```bash
-python main.py \
-  --archive "PDF处理" \
-  --in-pdf "example.pdf" \
-  --out-json "example.json"
-```
+## 📄 导出格式说明
 
-#### 2. 翻译校对（批处理）
+| 格式 | 用途 |
+|------|------|
+| **Paratranz JSON** | 用于上传至 Paratranz 在线协同翻译平台。 |
+| **Word (.docx)** | 基于 `md2doc.py` 转换，生成包含原文、一校、二校、注释的精美对比报告。 |
+| **新术语 JSON** | 汇总所有校对过程中 AI 发现的新专有名词，用于扩充原始术语库。 |
+| **原始 JSON** | 包含原始内容与校对内容。 |
+| **存档 JSON** | 包含当前进度内所有内容，用于程序从断点继续。 |
 
-```bash
-python main.py \
-  --archive "校对任务" \
-  --in-json "input.json" \
-  --out-json "output.json" \
-  --terms "terms.csv" \
-  --run-ai
-```
+## 🤝 报错查找
 
-## 📖 核心功能详解
+如果你在使用过程中遇到 API 超时或 OCR 解析异常，请检查：
 
-### PDF OCR 处理
+1. `config.yaml` 中的 `base_url` 是否包含 `/v1`。
+2. PDF 文件是否受损。
+3. 查看终端中的详细 Log 信息。
 
-1. **上传 PDF**：系统会将 PDF 文件上传到 OCR API
-2. **智能识别**：OCR 服务会识别文档结构和内容
-3. **文本提取**：提取识别后的文本并进行结构化处理
-4. **格式转换**：将结果转换为 JSON 或其他格式保存
+## 📝 版本信息
 
-### AI 翻译校对
-
-1. **数据准备**：加载待校对的文本数据
-2. **术语匹配**：自动匹配和应用术语表中的术语
-3. **AI 处理**：调用 AI 模型进行专业级校对
-4. **结果处理**：处理 AI 返回的校对结果并应用到原文
-5. **术语提取**：自动提取新出现的专业术语
-
-### 二校流程
-
-1. **加载一校结果**：读取一校生成的存档文件
-2. **术语对比**：同时使用旧术语表和新术语建议
-3. **精细校对**：基于一校结果进行最终优化
-4. **质量保证**：确保最终译文的准确性和一致性
-
-## 🔧 故障排除
-
-### 常见问题解决
-
-| 问题 | 解决方案 |
-|------|----------|
-| OCR API Error | 检查 OCR API 令牌是否正确，网络连接是否正常 |
-| API Token 过期 | 访问 API 提供商网站重新生成令牌并更新 config.yaml |
-| No module named 'pandas' | 运行 `pip install pandas` 安装缺失的依赖 |
-| GUI Import Failed | 确保安装了 tkinter（Windows 和 macOS 通常默认安装） |
-| SSL 证书错误 | 检查 API URL 是否为有效的 HTTPS 地址 |
-| AI 连接失败 | 检查网络连接和 API 密钥是否正确 |
-
-### 性能优化
-
-- **提高处理速度**：根据你的 CPU 核心数增加 `ai_max_workers` 值
-- **减少内存使用**：对于大型文档，减小 `max_blocks` 值
-- **避免 API 限制**：确保 `time_wait` 设置合理，避免触发 API 速率限制
-
-## 📚 技术栈
-
-- **编程语言**：Python 3.8+
-- **GUI 框架**：Tkinter（Python 标准库）
-- **数据处理**：Pandas
-- **网络请求**：Requests
-- **配置管理**：PyYAML
-- **AI 模型**：DeepSeek
-- **OCR 技术**：PaddleOCR API
-
-## 🤝 贡献指南
-
-欢迎为项目贡献代码和建议！贡献步骤：
-
-1. **Fork** 本项目
-2. **创建** 你的特性分支 (`git checkout -b feature/AmazingFeature`)
-3. **提交** 你的更改 (`git commit -m 'Add some AmazingFeature'`)
-4. **推送** 到分支 (`git push origin feature/AmazingFeature`)
-5. **开启** 一个 Pull Request
-
-## 📄 许可证
-
-本项目采用 MIT 许可证。详见 LICENSE 文件。
-
-## 📞 联系与反馈
-
-如有问题或建议，请通过 GitHub Issues 与我们联系：
-
-- **GitHub Issues**：[提交问题或建议](https://github.com/Oas7pOo/AiProofAgent/issues)
-- **项目地址**：[Oas7pOo/AiProofAgent](https://github.com/Oas7pOo/AiProofAgent)
-
----
-
-**版本**：1.0.0
-**更新日期**：2026-02-11
+**版本**：1.0.0-Test_Branch **状态**：持续迭代中 **维护者**：Oas7pOo

@@ -479,11 +479,15 @@ class RunTab(ttk.Frame):
             return
 
         try:
+            # 导入所需模块
+            import io
+            from core.format_converter import FormatConverter
+            from core.md2doc import parse_and_convert
+            
             # 1. 加载数据
             blocks, _, _ = FormatConverter.load_from_json(f_arc)
             
             # 2. 生成 Markdown 内容到内存
-            import io
             md_buffer = io.StringIO()
             
             # 临时重定向文件写入到内存缓冲区
@@ -495,8 +499,6 @@ class RunTab(ttk.Frame):
             
             # 使用 StringIO 来捕获 Markdown 内容
             import sys
-            from core.format_converter import FormatConverter
-            from core.md2doc import parse_and_convert
             
             # 生成 Markdown 内容
             md_content = self._generate_markdown_content(blocks, is_proof2=False)
