@@ -276,6 +276,9 @@ class Proof2Tab(ttk.Frame):
 
         self._set_export_visible(False)
         self._set_ui_ready(False)
+        
+        # 切换模式时重新启用开始按钮，允许用户选择新任务或加载其他存档
+        self.btn_start.config(state="normal")
 
         if mode == "new":
             # 新任务模式：显示所有输入框
@@ -359,6 +362,9 @@ class Proof2Tab(ttk.Frame):
         - 续校：自动加载最近二校存档；构建待处理批次并显示 prompt
         """
         try:
+            # 开始校对按钮只在加载文件时使用，点击后立即永久禁用
+            self.btn_start.config(state="disabled")
+            
             self.cfg = ConfigManager()
             
             # 读取配置参数
@@ -474,6 +480,7 @@ class Proof2Tab(ttk.Frame):
         self.auto_running = True
         self.btn_auto.config(state="disabled")
         self.btn_start.config(state="disabled")
+        self.btn_batch.config(state="disabled")  # 自动校对时禁用批量按钮
 
         t = threading.Thread(target=self._auto_loop, daemon=True)
         t.start()
@@ -492,10 +499,11 @@ class Proof2Tab(ttk.Frame):
         if max_workers <= 0:
             max_workers = 1
 
-        # 禁用按钮，避免重复点击
-        self.btn_batch.config(state="disabled")
-        self.btn_start.config(state="disabled")
-        self.btn_auto.config(state="disabled")
+        # 禁用按钮，避免重复点击（批量校对是单次操作，完成后不需要再使用这些按钮）
+        self.btn_batch.config(state="disabled")   # 批量按钮永久禁用
+        self.btn_start.config(state="disabled")   # 开始按钮永久禁用
+        self.btn_auto.config(state="disabled")    # 自动按钮永久禁用
+        self.btn_apply.config(state="disabled")   # 应用按钮永久禁用
 
         # 在后台线程中执行批量校对
         def batch_task():
@@ -522,23 +530,28 @@ class Proof2Tab(ttk.Frame):
                     completed_blocks = len([b for b in self.workflow.blocks if b.stage >= 2])
                     self.after(0, lambda: self.progress_var.set(f"校对进度: {completed_blocks}/{total_blocks}"))
                 
+                # 定义完成回调（在任务真正完成后执行）
+                def on_done(blocks):
+                    self.after(0, lambda: self.status_var.set("批量校对完成"))
+                    self.after(0, self._rebuild_batches_and_show_first)
+                    # 按钮已在点击时禁用，保持禁用状态
+                
+                # 定义错误回调
+                def on_error(e):
+                    self.after(0, lambda: messagebox.showerror("批量校对异常", str(e)))
+                    self.after(0, lambda: self.status_var.set(f"批量校对失败: {str(e)}"))
+                    # 按钮已在点击时禁用，保持禁用状态
+                
                 # 调用 Proofread2Workflow 的 run_bulk_async 方法
                 self.workflow.run_bulk_async(
                     progress_callback=update_progress,
-                    done_callback=lambda blocks: self.after(0, self._rebuild_batches_and_show_first),
-                    error_callback=lambda e: self.after(0, lambda: messagebox.showerror("批量校对异常", str(e)))
+                    done_callback=on_done,
+                    error_callback=on_error
                 )
-                # 校对完成后更新 UI
-                self.after(0, lambda: self.status_var.set("批量校对完成"))
-                self.after(0, lambda: self._rebuild_batches_and_show_first())
             except Exception as e:
                 self.after(0, lambda: messagebox.showerror("批量校对异常", str(e)))
                 self.after(0, lambda: self.status_var.set(f"批量校对失败: {str(e)}"))
-            finally:
-                # 恢复按钮状态
-                self.after(0, lambda: self.btn_batch.config(state="normal"))
-                self.after(0, lambda: self.btn_start.config(state="normal"))
-                self.after(0, lambda: self.btn_auto.config(state="normal"))
+                # 按钮已在点击时禁用，保持禁用状态
 
         t = threading.Thread(target=batch_task, daemon=True)
         t.start()
@@ -560,8 +573,9 @@ class Proof2Tab(ttk.Frame):
                 else:
                     # 暂停等待人工
                     self.auto_running = False
-                    self.after(0, lambda: self.status_var.set("自动校对暂停：等待人工修正并点击“应用”"))
+                    self.after(0, lambda: self.status_var.set('自动校对暂停：等待人工修正并点击"应用"'))
                     self.after(0, lambda: self.btn_start.config(state="normal"))
+                    self.after(0, lambda: self.btn_batch.config(state="normal"))  # 出错时启用批量按钮
                     return
 
             # 全部处理完成
@@ -572,6 +586,7 @@ class Proof2Tab(ttk.Frame):
             self.auto_running = False
             self.after(0, lambda: messagebox.showerror("自动校对异常", str(e)))
             self.after(0, lambda: self.btn_start.config(state="normal"))
+            self.after(0, lambda: self.btn_batch.config(state="normal"))  # 异常时启用批量按钮
 
     def _auto_process_one_batch(self, batch):
         # 1) 尝试 3 次

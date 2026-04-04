@@ -8,7 +8,18 @@ class TkTextHandler(logging.Handler):
     def emit(self, record):
         msg = self.format(record)
         if self.text_widget:
-            self.text_widget.after(0, self._append, msg)
+            # 检查当前线程是否是主线程
+            import threading
+            if threading.current_thread() is threading.main_thread():
+                # 主线程直接调用
+                self._append(msg)
+            else:
+                # 子线程使用 after 方法调度到主线程
+                try:
+                    self.text_widget.after(0, self._append, msg)
+                except RuntimeError:
+                    # 如果 Tkinter 未运行，忽略日志
+                    pass
 
     def _append(self, msg):
         self.text_widget.configure(state="normal")

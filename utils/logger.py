@@ -6,9 +6,9 @@ from datetime import datetime
 def get_logger(name="AiProofAgent"):
     logger = logging.getLogger(name)
     if not logger.handlers:
-        logger.setLevel(logging.DEBUG)
+        logger.setLevel(logging.WARNING)
         ch = logging.StreamHandler(sys.stdout)
-        ch.setLevel(logging.INFO)
+        ch.setLevel(logging.WARNING)
         fmt = logging.Formatter("%(asctime)s [%(name)s] %(levelname)s: %(message)s")
         ch.setFormatter(fmt)
         logger.addHandler(ch)
@@ -16,7 +16,7 @@ def get_logger(name="AiProofAgent"):
     return logger
 
 
-def setup_root_logger(level=logging.INFO):
+def setup_root_logger(level=logging.WARNING):
     logger = get_logger("AiProofAgent")
     logger.setLevel(level)
     for h in logger.handlers:
@@ -45,12 +45,12 @@ def setup_file_logger():
     
     # 添加文件处理器
     fh = logging.FileHandler(log_file, encoding='utf-8')
-    fh.setLevel(logging.DEBUG)
+    fh.setLevel(logging.WARNING)
     fmt = logging.Formatter("%(asctime)s [%(name)s] %(levelname)s: %(message)s")
     fh.setFormatter(fmt)
     root_logger.addHandler(fh)
     
     # 记录日志文件创建信息
-    root_logger.info(f"日志文件已创建: {log_file}")
+    root_logger.warning(f"日志文件已创建: {log_file}")
     
     return log_file

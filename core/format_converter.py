@@ -3,6 +3,7 @@ import csv
 import logging
 import re
 import os
+import threading
 from typing import List, Optional, Dict, Any
 from dataclasses import asdict
 
@@ -10,6 +11,17 @@ from models.document import TranslationBlock
 from core.term_manager import TermManager
 
 logger = logging.getLogger("AiProofAgent.FormatConverter")
+
+# 文件锁字典，用于防止并发写入同一个文件
+_file_locks = {}
+_file_locks_lock = threading.Lock()
+
+def _get_file_lock(file_path: str) -> threading.Lock:
+    """获取指定文件的锁，如果不存在则创建"""
+    with _file_locks_lock:
+        if file_path not in _file_locks:
+            _file_locks[file_path] = threading.Lock()
+        return _file_locks[file_path]
 
 class FormatConverter:
     """
@@ -20,45 +32,68 @@ class FormatConverter:
     @staticmethod
     def save_to_json(blocks: List[TranslationBlock], file_path: str, old_terms: Optional[TermManager] = None, new_terms: Optional[TermManager] = None):
         """将一校/二校中的 TranslationBlock 列表保存为 JSON 文件，用于中断恢复"""
-        try:
-            # 提取术语信息
-            old_terms_entries = []
-            if old_terms:
-                for term in old_terms.terms:
-                    old_terms_entries.append({
-                        "term": term.term,
-                        "translation": term.translation,
-                        "note": term.note
-                    })
-            
-            new_terms_entries = []
-            if new_terms:
-                for term in new_terms.terms:
-                    new_terms_entries.append({
-                        "term": term.term,
-                        "translation": term.translation,
-                        "note": term.note
-                    })
-            
-            # 构建存档数据
-            data = {
-                "meta": {
-                    "stage": "proofread1",
-                    "saved_at": "2026-04-02"
-                },
-                "terms": {
-                    "old_terms": old_terms_entries,
-                    "new_terms": new_terms_entries
-                },
-                "items": [asdict(block) for block in blocks]
-            }
-            
-            with open(file_path, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-            logger.info(f"成功保存 {len(blocks)} 个数据块状态到 {file_path}")
-        except Exception as e:
-            logger.error(f"保存 JSON 失败: {e}")
-            raise
+        # 获取文件锁，防止并发写入冲突
+        file_lock = _get_file_lock(file_path)
+        with file_lock:
+            try:
+                # 确保目标目录存在
+                os.makedirs(os.path.dirname(file_path), exist_ok=True)
+                
+                # 提取术语信息
+                old_terms_entries = []
+                if old_terms:
+                    for term in old_terms.terms:
+                        old_terms_entries.append({
+                            "term": term.term,
+                            "translation": term.translation,
+                            "note": term.note
+                        })
+                
+                new_terms_entries = []
+                if new_terms:
+                    for term in new_terms.terms:
+                        new_terms_entries.append({
+                            "term": term.term,
+                            "translation": term.translation,
+                            "note": term.note
+                        })
+                
+                # 构建存档数据
+                data = {
+                    "meta": {
+                        "stage": "proofread1",
+                        "saved_at": "2026-04-02"
+                    },
+                    "terms": {
+                        "old_terms": old_terms_entries,
+                        "new_terms": new_terms_entries
+                    },
+                    "items": [asdict(block) for block in blocks]
+                }
+                
+                # 使用临时文件 + 原子重命名，确保线程安全和文件完整性
+                temp_file = file_path + '.tmp'
+                with open(temp_file, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                
+                # 原子重命名，添加重试机制
+                import time
+                max_retries = 30
+                for attempt in range(max_retries):
+                    try:
+                        os.replace(temp_file, file_path)
+                        break
+                    except PermissionError as e:
+                        if attempt < max_retries - 1:
+                            logger.warning(f"保存失败，{1}秒后重试 ({attempt + 1}/{max_retries}): {e}")
+                            time.sleep(random.uniform(1, 3))
+                        else:
+                            raise
+                
+                logger.info(f"成功保存 {len(blocks)} 个数据块状态到 {file_path}")
+            except Exception as e:
+                logger.error(f"保存 JSON 失败: {e}")
+                raise
 
     @staticmethod
     def load_from_json(file_path: str) -> tuple:
