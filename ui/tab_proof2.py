@@ -154,7 +154,7 @@ class Proof2Tab(ttk.Frame):
 
         self.grp_files.columnconfigure(1, weight=1)
 
-        # 3. 按钮区
+        # 3. 控制按钮区
         btn_fr = ttk.Frame(self, padding=(0, 10))
         btn_fr.pack(fill="x", padx=10)
 
@@ -167,22 +167,26 @@ class Proof2Tab(ttk.Frame):
         self.btn_batch = ttk.Button(btn_fr, text="批量校对", command=self.on_batch)
         self.btn_batch.pack(side="left", padx=5)
 
-        self.btn_export_json = ttk.Button(btn_fr, text="导出JSON", command=self.on_export_json)
-        self.btn_export_json.pack(side="left", padx=16)
-
-        self.btn_export_para_json = ttk.Button(btn_fr, text="导出Paratranz JSON", command=self.export_para_json)
-        self.btn_export_para_json.pack(side="left", padx=5)
-
-        self.btn_export_para_csv = ttk.Button(btn_fr, text="导出Paratranz CSV", command=self.export_para_csv)
-        self.btn_export_para_csv.pack(side="left", padx=5)
-
-        self.btn_export_state_json = ttk.Button(btn_fr, text="导出内部状态JSON", command=self.export_state_json)
-        self.btn_export_state_json.pack(side="left", padx=5)
-
-        self.btn_export_doc = ttk.Button(btn_fr, text="导出DOC", command=self.on_export_doc)
-        self.btn_export_doc.pack(side="left", padx=5)
-
         ttk.Label(btn_fr, textvariable=self.status_var).pack(side="left", padx=16)
+
+        # 4. 导出按钮区（默认隐藏，任务完成后才显示）
+        self.export_actions_fr = ttk.LabelFrame(self, text="导出（任务完成后可用）")
+        self.btn_export_json = ttk.Button(self.export_actions_fr, text="导出JSON", command=self.on_export_json)
+        self.btn_export_para_json = ttk.Button(self.export_actions_fr, text="导出Paratranz JSON", command=self.export_para_json)
+        self.btn_export_para_csv = ttk.Button(self.export_actions_fr, text="导出Paratranz CSV", command=self.export_para_csv)
+        self.btn_export_state_json = ttk.Button(self.export_actions_fr, text="导出内部状态JSON", command=self.export_state_json)
+        self.btn_export_doc = ttk.Button(self.export_actions_fr, text="导出DOC", command=self.on_export_doc)
+        self.btn_export_json.pack(side="left", padx=5, pady=8)
+        self.btn_export_para_json.pack(side="left", padx=5, pady=8)
+        self.btn_export_para_csv.pack(side="left", padx=5, pady=8)
+        self.btn_export_state_json.pack(side="left", padx=5, pady=8)
+        self.btn_export_doc.pack(side="left", padx=5, pady=8)
+
+        # 5. 进度显示
+        self.progress_var = tk.StringVar(value="")
+        progress_fr = ttk.LabelFrame(self, text="校对进度")
+        progress_fr.pack(fill="x", pady=5)
+        ttk.Label(progress_fr, textvariable=self.progress_var).pack(padx=10, pady=5, anchor="w")
 
     def _build_main_panes(self):
         paned = ttk.Panedwindow(self, orient=tk.HORIZONTAL)
@@ -256,6 +260,13 @@ class Proof2Tab(ttk.Frame):
         self.btn_export_state_json.config(state=state)
         self.btn_export_doc.config(state=state)
 
+    def _set_export_visible(self, visible: bool):
+        """控制导出按钮区域的显示/隐藏"""
+        if visible:
+            self.export_actions_fr.pack(fill="x", padx=10, pady=5, after=self.grp_files)
+        else:
+            self.export_actions_fr.pack_forget()
+
     def _on_mode_change(self, *args):
         mode = self.mode_var.get()
 
@@ -263,7 +274,7 @@ class Proof2Tab(ttk.Frame):
         for w in self.grp_files.winfo_children():
             w.grid_forget()
 
-        self._set_export_enabled(False)
+        self._set_export_visible(False)
         self._set_ui_ready(False)
 
         if mode == "new":
@@ -415,22 +426,34 @@ class Proof2Tab(ttk.Frame):
         if not self.batch_queue:
             # 已完成
             self.status_var.set("已完成（无待二校项）")
-            self._set_export_enabled(True)
+            self._set_export_visible(True)
             self._set_ui_ready(False)
             self._set_prompt_text("")
             self._set_resp_text("")
+            # 更新进度显示
+            total = len(self.workflow.blocks)
+            completed = len([b for b in self.workflow.blocks if b.stage >= 2])
+            self.progress_var.set(f"校对进度: {completed}/{total}")
             return
 
         self.status_var.set(f"已加载：待处理批次 {len(self.batch_queue)}")
         self._set_ui_ready(True)
-        self._set_export_enabled(False)
+        self._set_export_visible(False)
+        # 更新进度显示
+        total = len(self.workflow.blocks)
+        completed = len([b for b in self.workflow.blocks if b.stage >= 2])
+        self.progress_var.set(f"校对进度: {completed}/{total}")
         self._show_current_batch()
 
     def _show_current_batch(self):
         if not self.batch_queue:
             self.status_var.set("已完成（全部二校完成）")
-            self._set_export_enabled(True)
+            self._set_export_visible(True)
             self._set_ui_ready(False)
+            # 更新进度显示
+            total = len(self.workflow.blocks)
+            completed = len([b for b in self.workflow.blocks if b.stage >= 2])
+            self.progress_var.set(f"校对进度: {completed}/{total}")
             return
 
         batch = self.batch_queue[0]
@@ -477,8 +500,8 @@ class Proof2Tab(ttk.Frame):
         # 在后台线程中执行批量校对
         def batch_task():
             try:
-                # 创建一个新的工作流实例，使用配置的并发数
-                batch_workflow = Proofread2Workflow(
+                # 重新初始化工作流，使用配置的并发数
+                self.workflow = Proofread2Workflow(
                     max_workers=max_workers,
                     delay_seconds=delay_seconds,
                     max_blocks=max_blocks,
@@ -486,17 +509,21 @@ class Proof2Tab(ttk.Frame):
                 )
                 
                 # 加载数据
-                batch_workflow.init_session(self.archive_path)
+                self.workflow.init_session(self.archive_path)
                 
-                total_batches = len(batch_workflow.pending_queue)
-                self.status_var.set(f"开始批量校对，并发数: {max_workers}，总批次: {total_batches}")
+                total_batches = len(self.workflow.pending_queue)
+                self.after(0, lambda: self.status_var.set(f"开始批量校对，并发数: {max_workers}，总批次: {total_batches}"))
                 
                 # 定义进度更新回调
                 def update_progress(processed, total):
                     self.after(0, lambda: self.status_var.set(f"批量校对中: {processed}/{total} 批次"))
+                    # 更新block进度
+                    total_blocks = len(self.workflow.blocks)
+                    completed_blocks = len([b for b in self.workflow.blocks if b.stage >= 2])
+                    self.after(0, lambda: self.progress_var.set(f"校对进度: {completed_blocks}/{total_blocks}"))
                 
                 # 调用 Proofread2Workflow 的 run_bulk_async 方法
-                batch_workflow.run_bulk_async(
+                self.workflow.run_bulk_async(
                     progress_callback=update_progress,
                     done_callback=lambda blocks: self.after(0, self._rebuild_batches_and_show_first),
                     error_callback=lambda e: self.after(0, lambda: messagebox.showerror("批量校对异常", str(e)))
@@ -569,6 +596,11 @@ class Proof2Tab(ttk.Frame):
                 # 应用结果
                 self.workflow.apply_batch(batch, data)
 
+                # 更新进度显示
+                total = len(self.workflow.blocks)
+                completed = len([b for b in self.workflow.blocks if b.stage >= 2])
+                self.after(0, lambda: self.progress_var.set(f"校对进度: {completed}/{total}"))
+
                 # pop batch + show next
                 self.batch_queue.pop(0)
                 self.after(0, self._show_current_batch)
@@ -616,6 +648,11 @@ class Proof2Tab(ttk.Frame):
 
         # 应用结果
         self.workflow.apply_batch(batch, data)
+
+        # 更新进度显示
+        total = len(self.workflow.blocks)
+        completed = len([b for b in self.workflow.blocks if b.stage >= 2])
+        self.progress_var.set(f"校对进度: {completed}/{total}")
 
         # 从队列中移除已处理的批次
         self.batch_queue.pop(0)

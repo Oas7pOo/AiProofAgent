@@ -12,6 +12,7 @@ from core.utils import match_terms_for_block, format_terms
 from models.term import TermEntry
 from models.document import TranslationBlock
 from workflows.base_runner import BatchTaskRunner
+from utils import profile, print_stats
 
 logger = logging.getLogger("AiProofAgent.Proofread2")
 
@@ -86,7 +87,15 @@ class Proofread2Workflow:
                 if block.stage < 1:
                     block.stage = 1
             
-            # 保存到二校存档
+            # 如果提供了术语文件，覆盖从一校恢复的术语
+            if old_terms_path:
+                self.old_terms.load_terms(old_terms_path)
+                logger.info(f"已加载旧术语表: {old_terms_path}")
+            if new_terms_path:
+                self.new_terms.load_terms(new_terms_path)
+                logger.info(f"已加载新术语表: {new_terms_path}")
+            
+            # 保存到二校存档（此时术语已经包含用户传入的术语文件）
             FormatConverter.save_to_json(self.blocks, self.archive_path, self.old_terms, self.new_terms)
         else:
             # 从二校存档加载数据和术语
@@ -112,14 +121,6 @@ class Proofread2Workflow:
                             ))
                 self.new_terms._build_matchers()
                 logger.info(f"从二校存档恢复 {len(new_terms_entries)} 条新术语")
-        
-        # 如果提供了术语文件，覆盖从存档恢复的术语
-        if old_terms_path: 
-            self.old_terms.load_terms(old_terms_path)
-            logger.info(f"已加载旧术语表: {old_terms_path}")
-        if new_terms_path: 
-            self.new_terms.load_terms(new_terms_path)
-            logger.info(f"已加载新术语表: {new_terms_path}")
 
     def build_batches(self, max_blocks: int = 5, max_chars: int = 6000) -> int:
         """将待二校的数据分组装载至处理队列"""
@@ -147,6 +148,7 @@ class Proofread2Workflow:
 
 
 
+    @profile
     def build_prompt_for_batch(self, batch: List[TranslationBlock]) -> str:
         """为当前批次构建上下文连贯的 Prompt"""
 
@@ -192,6 +194,7 @@ class Proofread2Workflow:
         )
         return prompt
 
+    @profile
     def request_llm(self, prompt: str) -> str:
         """向 LLM 发起请求并提取 JSON"""
         system_prompt = "你是一个严谨的翻译校对助手。请只输出合法的 JSON 数组结构，不要包含 markdown 代码块标记。"
@@ -200,6 +203,7 @@ class Proofread2Workflow:
         resp = re.sub(r'\s*```$', '', resp)
         return resp
 
+    @profile
     def parse_and_validate(self, batch: List[TranslationBlock], text: str) -> Tuple[bool, str, List[Dict]]:
         """校验返回的 JSON 是否格式完好且与原区块一一对应"""
         try:
@@ -228,6 +232,7 @@ class Proofread2Workflow:
             error_msg = f"JSON 解析失败: {e}\n\n返回的 JSON 内容:\n{preview}"
             return False, error_msg, []
 
+    @profile
     def _extract_data_from_text(self, text: str, batch: List[TranslationBlock]) -> List[Dict]:
         """当 JSON 解析失败时，通过正则表达式从文本中提取数据"""
         result = []
@@ -255,6 +260,7 @@ class Proofread2Workflow:
         
         return result
 
+    @profile
     def apply_batch(self, batch: List[TranslationBlock], data: List[Dict]):
         """将用户或 LLM 生成的校验数据应用到内存模型并持久化"""
         data_map = {str(item.get("BLOCK_ID")): item for item in data}
@@ -267,6 +273,7 @@ class Proofread2Workflow:
         
         FormatConverter.save_to_json(self.blocks, self.archive_path, self.old_terms, self.new_terms)
 
+    @profile
     def run_bulk_async(self, progress_callback=None, done_callback=None, error_callback=None):
         """批量盲跑模式 (兼容之前的批处理并发逻辑)"""
         def _task():
@@ -305,6 +312,9 @@ class Proofread2Workflow:
                 # 执行并发处理
                 self.runner.run_sync(self.pending_queue, self._process_batch, on_progress=custom_progress_callback)
                 
+                # 打印统计信息
+                print_stats()
+                
                 # 任务完成
                 logger.info("二校流水线全部完成")
                 if done_callback:
@@ -316,6 +326,7 @@ class Proofread2Workflow:
                     error_callback(e)
         threading.Thread(target=_task, daemon=True).start()
 
+    @profile
     def _process_batch(self, batch: List[TranslationBlock]) -> List[TranslationBlock]:
         """处理一个批次的块，包含失败重试和任务拆分机制"""
         result = self._process_recursive(batch, depth=0)
@@ -324,6 +335,7 @@ class Proofread2Workflow:
         logger.info(f"已保存批次处理状态到: {self.archive_path}")
         return result
     
+    @profile
     def _process_recursive(self, batch: List[TranslationBlock], depth: int = 0) -> List[TranslationBlock]:
         if not batch:
             return batch

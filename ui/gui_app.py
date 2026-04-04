@@ -5,7 +5,7 @@ from ui.tab_proof import RunTab
 from ui.tab_proof2 import Proof2Tab
 from ui.tab_settings import SettingsTab
 from utils.config import ConfigManager
-from utils.logger import setup_root_logger
+from utils.logger import setup_root_logger, setup_file_logger
 
 class ProofreadGUI(tk.Tk):
     def __init__(self, config=None):
@@ -13,6 +13,7 @@ class ProofreadGUI(tk.Tk):
         self.title("AI Proofread Tool")
         self.geometry("950x850")
         setup_root_logger()
+        setup_file_logger()
         self.cfg = config if config is not None else ConfigManager().data
 
         self.notebook = ttk.Notebook(self)
