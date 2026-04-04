@@ -163,26 +163,3 @@ def handle_html_table(html_str, doc):
                     for paragraph in doc_cell.paragraphs:
                         paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-# ================= 测试运行区 =================
-markdown_data = """
-# 校对报告: worldbook_state_p2_final
-
-> 目录结构基于原文 Markdown 标记还原
-
-# 制作人员
-
-*CREDITS* `[worldbook_P001_B001]`
-
-> 原始译文: # 制作人员
-
-> 标题建议: 维持一校译文，符合出版规范。
-
-**[worldbook_P001_B002]**
-
-> 原文: LEAD DESIGNER Wolfgang Baur
-> 原始译文: 首席设计师 沃尔夫冈·鲍尔
-> 校对: **首席设计师 沃尔夫冈·鲍尔**
-> *建议: 维持一校译文，人名Wolfgang Baur按新术语建议音译。*
-"""
-
-parse_and_convert(markdown_data, "C:\\Users\\HASEE\\study_ai\\AiProofAgent\\data\\Translated_Tables.docx")
