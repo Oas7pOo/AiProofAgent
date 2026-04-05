@@ -504,7 +504,7 @@ class RunTab(ttk.Frame):
             md_content = self._generate_markdown_content(blocks, is_proof2=False)
             
             # 3. 转换为 DOC
-            parse_and_convert(md_content, out_doc)
+            parse_and_convert(md_content, out_doc, is_proof2=False)
             
             messagebox.showinfo("成功", f"已导出：\n{os.path.basename(out_doc)}")
         except Exception as e:

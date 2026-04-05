@@ -709,7 +709,7 @@ class Proof2Tab(ttk.Frame):
             md_content = self._generate_markdown_content(self.workflow.blocks, is_proof2=True)
             
             # 2. 转换为 DOC
-            parse_and_convert(md_content, out)
+            parse_and_convert(md_content, out, is_proof2=True)
             messagebox.showinfo("导出成功", f"已导出 DOC:\n{os.path.basename(out)}")
 
         except Exception as e:
