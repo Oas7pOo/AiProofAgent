@@ -32,72 +32,190 @@ class PaddleOCREngine:
     def process_pdf(self, file_path: str) -> List[TranslationBlock]:
         """
         处理 PDF 文件并返回分段好的 TranslationBlock 列表。
-        使用分批处理策略：先尝试处理 max_batch_pages 页，如果失败则减少页数重试。
+
+        改进点：
+        1. 支持最后不足 10 页的批次，避免 91 页这类 PDF 在最后 1 页失败。
+        2. 对 file_path / PDF 读取 / batch 配置做校验。
+        3. OCR 返回空块时视为“本批处理成功但未提取到文本”，不中断整体流程。
+        4. 日志页码严格使用处理前保存的区间，避免出现“91 到 90 页”。
+        5. 分批失败时逐步缩小批大小，直到 1 页，提升健壮性。
         """
         logger.info(f"开始使用 PaddleOCR-VL-1.5 处理 PDF: {file_path}")
-        
+
         if not PYPDF2_AVAILABLE:
             logger.error("PyPDF2 not installed, cannot process PDF in batches")
             raise ImportError("PyPDF2 is required for PDF batch processing. Install with: pip install PyPDF2")
-        
+
+        if not file_path or not isinstance(file_path, str):
+            raise ValueError("file_path 不能为空，且必须是字符串")
+
+        file_path = os.path.abspath(file_path)
+
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"PDF 文件不存在: {file_path}")
+        if not os.path.isfile(file_path):
+            raise FileNotFoundError(f"路径不是文件: {file_path}")
+        if not file_path.lower().endswith(".pdf"):
+            logger.warning(f"输入文件扩展名不是 .pdf，但仍尝试按 PDF 处理: {file_path}")
+
         # 读取 PDF 获取总页数
-        reader = PdfReader(file_path)
-        total_pages = len(reader.pages)
+        try:
+            reader = PdfReader(file_path)
+            total_pages = len(reader.pages)
+        except Exception as e:
+            logger.exception("读取 PDF 失败")
+            raise Exception(f"无法读取 PDF：{e}") from e
+
+        if total_pages <= 0:
+            raise Exception("PDF 没有可处理的页面")
+
         logger.info(f"PDF 总页数: {total_pages}")
-        
+
+        # 规范化 batch 配置
+        try:
+            max_batch_pages = int(self.max_batch_pages)
+        except Exception:
+            logger.warning(f"ocr.max_batch_pages={self.max_batch_pages!r} 非法，回退为 90")
+            max_batch_pages = 90
+
+        if max_batch_pages <= 0:
+            logger.warning(f"ocr.max_batch_pages={max_batch_pages} 非法，回退为 1")
+            max_batch_pages = 1
+
         # 提取去除了数字的文档名，作为段落 Key 的前缀
-        doc_name = os.path.basename(file_path).split('.')[0]
-        doc_name = re.sub(r'\d+', '', doc_name).strip(' _-')
-        if not doc_name: doc_name = "doc"
-        
-        all_blocks = []
-        current_page = 0
-        page_offset = 0  # 用于调整页码
-        
+        doc_name = os.path.splitext(os.path.basename(file_path))[0]
+        doc_name = re.sub(r"\d+", "", doc_name).strip(" _-")
+        if not doc_name:
+            doc_name = "doc"
+
+        all_blocks: List[TranslationBlock] = []
+        current_page = 0  # 0-based
+        max_retries = 3
+
+        def _build_candidate_batch_sizes(initial_size: int) -> List[int]:
+            """
+            生成一组降级批大小：
+            例如 initial=37 -> [37, 27, 17, 7, 6, 5, 4, 3, 2, 1]
+            例如 initial=90 -> [90, 80, 70, ..., 10, 9, 8, ..., 1]
+            """
+            sizes = []
+            size = initial_size
+
+            while size > 10:
+                sizes.append(size)
+                size -= 10
+
+            if size > 0:
+                sizes.append(size)
+
+            # 再把更小的补齐到 1，保证最后单页也能试
+            last = sizes[-1] if sizes else initial_size
+            for s in range(last - 1, 0, -1):
+                sizes.append(s)
+
+            # 去重 + 过滤非法值
+            deduped = []
+            seen = set()
+            for s in sizes:
+                if s >= 1 and s not in seen:
+                    deduped.append(s)
+                    seen.add(s)
+            return deduped
+
         while current_page < total_pages:
-            # 计算本次要处理的页面范围
             remaining_pages = total_pages - current_page
-            batch_size = min(self.max_batch_pages, remaining_pages)
-            
-            # 尝试处理当前批次
-            success = False
-            current_batch_size = batch_size
-            max_retries = 3
-            
-            while current_batch_size >= 10 and not success:
-                end_page = min(current_page + current_batch_size, total_pages)
-                logger.info(f"尝试处理第 {current_page + 1} 到 {end_page} 页 (共 {current_batch_size} 页)")
-                
-                # 提取当前批次的页面
-                pdf_bytes = self._extract_pages(file_path, current_page, end_page)
-                
-                # 尝试解析
-                for attempt in range(max_retries):
+            initial_batch_size = min(max_batch_pages, remaining_pages)
+            candidate_batch_sizes = _build_candidate_batch_sizes(initial_batch_size)
+
+            logger.info(
+                f"当前进度：已完成 {current_page}/{total_pages} 页，"
+                f"准备从第 {current_page + 1} 页开始处理，初始批大小={initial_batch_size}"
+            )
+
+            batch_done = False
+            last_error = None
+
+            for candidate_size in candidate_batch_sizes:
+                start_page = current_page
+                end_page = min(start_page + candidate_size, total_pages)  # end_page 为右开边界
+                page_count = end_page - start_page
+
+                if page_count <= 0:
+                    continue
+
+                human_start = start_page + 1
+                human_end = end_page  # 因为右开边界 end_page 对应人类页码正好就是最后一页
+
+                logger.info(f"尝试处理第 {human_start} 到 {human_end} 页 (共 {page_count} 页)")
+
+                try:
+                    pdf_bytes = self._extract_pages(file_path, start_page, end_page)
+                except Exception as e:
+                    last_error = e
+                    logger.warning(f"提取第 {human_start} 到 {human_end} 页失败: {e}")
+                    continue
+
+                if not pdf_bytes:
+                    last_error = Exception("提取得到空 PDF 字节流")
+                    logger.warning(f"提取第 {human_start} 到 {human_end} 页得到空字节流，将尝试更小批次")
+                    continue
+
+                for attempt in range(1, max_retries + 1):
                     try:
-                        blocks = self._process_pdf_batch(pdf_bytes, current_page, end_page, doc_name, page_offset)
-                        if blocks:
-                            all_blocks.extend(blocks)
-                            success = True
-                            page_offset += (end_page - current_page)
-                            current_page = end_page
-                            logger.info(f"成功处理第 {current_page - (end_page - current_page) + 1} 到 {end_page} 页，提取 {len(blocks)} 个块")
-                            break
+                        # 这里直接把 start_page 作为页偏移传入
+                        # 因为 _process_pdf_batch() 内 actual_page_num = page_offset + i + 1
+                        # 所以传 start_page 后，页码将正确映射为真实 PDF 页码
+                        blocks = self._process_pdf_batch(
+                            pdf_bytes, start_page, end_page, doc_name, start_page
+                        )
+
+                        if blocks is None:
+                            blocks = []
+
+                        if not isinstance(blocks, list):
+                            raise TypeError(
+                                f"_process_pdf_batch 返回值类型错误，应为 list，实际为 {type(blocks).__name__}"
+                            )
+
+                        all_blocks.extend(blocks)
+
+                        # 注意：无论 blocks 是否为空，只要 OCR 调用成功返回，就视为这一批处理成功
+                        # 否则会把“空白页/图片页/未识别到文本”的正常情况误判为失败
+                        current_page = end_page
+                        batch_done = True
+
+                        logger.info(
+                            f"成功处理第 {human_start} 到 {human_end} 页，提取 {len(blocks)} 个块"
+                        )
+                        if len(blocks) == 0:
+                            logger.warning(
+                                f"第 {human_start} 到 {human_end} 页未提取到文本块，已按空结果继续"
+                            )
+                        break
+
                     except Exception as e:
-                        logger.warning(f"第 {attempt + 1} 次尝试失败: {e}")
-                        if attempt == max_retries - 1:
-                            logger.error(f"处理第 {current_page + 1} 到 {end_page} 页失败，将减少页数重试")
-                
-                if not success:
-                    # 减少页数重试
-                    current_batch_size -= 10
-                    if current_batch_size < 10:
-                        logger.error(f"无法处理第 {current_page + 1} 页及之后的页面，即使减少到 10 页也失败")
-                        raise Exception(f"PDF 处理失败：第 {current_page + 1} 页无法解析")
-            
-            if not success:
-                logger.error(f"无法处理第 {current_page + 1} 页及之后的页面")
-                raise Exception(f"PDF 处理失败：无法解析第 {current_page + 1} 页及之后的页面")
-        
+                        last_error = e
+                        logger.warning(
+                            f"处理第 {human_start} 到 {human_end} 页失败，"
+                            f"第 {attempt}/{max_retries} 次尝试异常: {e}"
+                        )
+
+                if batch_done:
+                    break
+
+                logger.error(
+                    f"处理第 {human_start} 到 {human_end} 页失败，将缩小批大小后继续重试"
+                )
+
+            if not batch_done:
+                fail_page = current_page + 1
+                logger.error(f"无法处理第 {fail_page} 页及之后的页面")
+                if last_error is not None:
+                    raise Exception(
+                        f"PDF 处理失败：无法解析第 {fail_page} 页及之后的页面；最后一次错误：{last_error}"
+                    ) from last_error
+                raise Exception(f"PDF 处理失败：无法解析第 {fail_page} 页及之后的页面")
+
         logger.info(f"PDF 处理完成，共解析 {total_pages} 页，提取 {len(all_blocks)} 个段落/表格块。")
         return all_blocks
     

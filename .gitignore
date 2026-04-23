@@ -16,6 +16,7 @@ __pycache__/
 venv/
 env/
 ENV/
+build_env/
 env.bak/
 venv.bak/
 
@@ -51,3 +52,5 @@ coverage/
 build/
 dist/
 *.egg-info/
+AiProofAgent.spec
+dist.zip
