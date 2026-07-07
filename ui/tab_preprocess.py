@@ -226,7 +226,8 @@ class PreprocessTab(ttk.Frame):
                 
             except Exception as e:
                 logger.error(f"处理失败: {e}", exc_info=True)
-                self.after(0, lambda: messagebox.showerror("错误", f"处理失败:\n{str(e)}"))
+                error_msg = str(e)
+                self.after(0, lambda msg=error_msg: messagebox.showerror("错误", f"处理失败:\n{msg}"))
             finally:
                 self.after(0, lambda: self._toggle_ui_state(False))
         

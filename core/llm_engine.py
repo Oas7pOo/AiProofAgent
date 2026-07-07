@@ -21,9 +21,12 @@ class LlmEngine:
         self.base_url = _get_val(["llm.base_url", "base_url"], "https://api.openai.com/v1")
         self.model = _get_val(["llm.model", "model"], "gpt-3.5-turbo")
         self.api_key = _get_val(["llm.api_key", "api_key"], "")
-        self.timeout = int(_get_val(["llm.timeout", "timeout"], 120))
+        
+        # 超时设置：config中timeout以秒为单位
+        timeout_ms = int(_get_val(["llm.timeout", "timeout"], 120))
+        self.timeout = timeout_ms  
 
-        logger.info(f"LLM配置读取结果: URL={self.base_url}, Model={self.model}, Key已填入={'是' if self.api_key else '否'}")
+        logger.info(f"LLM配置读取结果: URL={self.base_url}, Model={self.model}, Key已填入={'是' if self.api_key else '否'}, 超时={self.timeout}秒")
         
         # 初始化 requests Session
         self.session = requests.Session()
@@ -90,6 +93,15 @@ class LlmEngine:
             
             raise ValueError(f"返回结构缺失 choices 字段: {json.dumps(result, ensure_ascii=False)}")
             
+        except requests.exceptions.ReadTimeout as e:
+            logger.error(f"网络请求超时: {e}")
+            self.session.close()
+            self.session = requests.Session()
+            self.session.headers.update({
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            })
+            raise ValueError(f"网络请求超时: {e}")
         except requests.exceptions.RequestException as e:
             logger.error(f"网络请求失败: {e}")
             raise ValueError(f"网络请求失败: {e}")

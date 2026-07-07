@@ -192,15 +192,15 @@ class Proofread1Workflow:
         
         return batches
 
-    def _process_batch(self, batch: List[TranslationBlock]) -> List[TranslationBlock]:
+    def _process_batch(self, batch: List[TranslationBlock], rate_limiter=None) -> List[TranslationBlock]:
         """处理一个批次的块，包含失败重试和任务拆分机制"""
-        result = self._process_recursive(batch, depth=0)
+        result = self._process_recursive(batch, depth=0, rate_limiter=rate_limiter)
         # 处理完一个批次后保存状态
         FormatConverter.save_to_json(self.blocks, self.out_path, self.old_terms, self.new_terms)
         logger.info(f"已保存批次处理状态到: {self.out_path}")
         return result
     
-    def _process_recursive(self, batch: List[TranslationBlock], depth: int = 0) -> List[TranslationBlock]:
+    def _process_recursive(self, batch: List[TranslationBlock], depth: int = 0, rate_limiter=None) -> List[TranslationBlock]:
         if not batch:
             return batch
         
@@ -253,6 +253,10 @@ class Proofread1Workflow:
                 # 记录完整的 prompt 内容
                 logger.info(f"构建的完整 prompt: {prompt}")
                 
+                # 速率限制：在发送请求前获取令牌
+                if rate_limiter:
+                    rate_limiter.acquire()
+                
                 # 发送请求
                 response = self.llm_engine.request_prompt(prompt=prompt, system_prompt=system_prompt)
                 
@@ -286,6 +290,10 @@ class Proofread1Workflow:
                         block_id = item.get("BLOCK_ID")
                         if block_id and block_id in block_map:
                             block = block_map[block_id]
+                            # 幂等性检查：如果块已经完成一校，则跳过
+                            if block.stage >= 1:
+                                logger.info(f"跳过已处理的块: {block.key}")
+                                continue
                             block.proofread1_zh = item.get("proofread_zh", "")
                             block.proofread1_note = item.get("proofread_note", "")
                             # 处理新术语
@@ -324,6 +332,10 @@ class Proofread1Workflow:
                             block_id = item.get("BLOCK_ID")
                             if block_id and block_id in block_map:
                                 block = block_map[block_id]
+                                # 幂等性检查：如果块已经完成一校，则跳过
+                                if block.stage >= 1:
+                                    logger.info(f"跳过已处理的块: {block.key}")
+                                    continue
                                 block.proofread1_zh = item.get("proofread_zh", "")
                                 block.proofread1_note = item.get("proofread_note", "")
                                 # 处理新术语
@@ -357,10 +369,7 @@ class Proofread1Workflow:
                     raise
                 
                 if attempt < MAX_RETRIES - 1:
-                    # 重试等待时间使用配置值
-                    retry_wait = self.runner.delay_seconds if self.runner.delay_seconds > 0 else 2
-                    logger.warning(f"[Depth={depth}] 请求失败，{retry_wait} 秒后进行第 {attempt+1} 次重试: {e}")
-                    time.sleep(retry_wait)
+                    logger.warning(f"[Depth={depth}] 请求失败，准备进行第 {attempt+1} 次重试: {e}")
                 else:
                     logger.error(f"[Depth={depth}] 已达最大重试次数，当前批次失败: {e}")
         
@@ -369,7 +378,7 @@ class Proofread1Workflow:
             mid = len(batch) // 2
             left, right = batch[:mid], batch[mid:]
             logger.info(f"[Depth={depth}] 批次拆分: {len(left)} + {len(right)}")
-            return self._process_recursive(left, depth + 1) + self._process_recursive(right, depth + 1)
+            return self._process_recursive(left, depth + 1, rate_limiter) + self._process_recursive(right, depth + 1, rate_limiter)
         
         # 单条失败：标记为错误
         block = batch[0]

@@ -132,6 +132,23 @@ class FormatConverter:
             else:
                 blocks = []
             
+            # 检查重复key
+            key_counts = {}
+            duplicate_keys = []
+            for block in blocks:
+                if block.key:
+                    key_counts[block.key] = key_counts.get(block.key, 0) + 1
+                    if key_counts[block.key] > 1:
+                        duplicate_keys.append(block.key)
+            
+            if duplicate_keys:
+                unique_duplicates = list(set(duplicate_keys))
+                error_msg = f"发现重复key ({len(unique_duplicates)}个): {', '.join(unique_duplicates[:10])}"
+                if len(unique_duplicates) > 10:
+                    error_msg += f"...还有 {len(unique_duplicates) - 10} 个"
+                logger.error(error_msg)
+                raise ValueError(error_msg)
+            
             logger.info(f"成功从 {file_path} 恢复 {len(blocks)} 个数据块")
             return blocks, old_terms_entries, new_terms_entries
         except Exception as e:
@@ -266,6 +283,23 @@ class FormatConverter:
                     )
                     blocks.append(block)
             
+            # 检查重复key
+            key_counts = {}
+            duplicate_keys = []
+            for block in blocks:
+                if block.key:
+                    key_counts[block.key] = key_counts.get(block.key, 0) + 1
+                    if key_counts[block.key] > 1:
+                        duplicate_keys.append(block.key)
+            
+            if duplicate_keys:
+                unique_duplicates = list(set(duplicate_keys))
+                error_msg = f"发现重复key ({len(unique_duplicates)}个): {', '.join(unique_duplicates[:10])}"
+                if len(unique_duplicates) > 10:
+                    error_msg += f"...还有 {len(unique_duplicates) - 10} 个"
+                logger.error(error_msg)
+                raise ValueError(error_msg)
+            
             logger.info(f"成功从 {file_path} 加载 {len(blocks)} 个数据块")
             return blocks
         except Exception as e:
@@ -301,6 +335,23 @@ class FormatConverter:
                     zh_block=zh_block
                 )
                 blocks.append(block)
+            
+            # 检查重复key
+            key_counts = {}
+            duplicate_keys = []
+            for block in blocks:
+                if block.key:
+                    key_counts[block.key] = key_counts.get(block.key, 0) + 1
+                    if key_counts[block.key] > 1:
+                        duplicate_keys.append(block.key)
+            
+            if duplicate_keys:
+                unique_duplicates = list(set(duplicate_keys))
+                error_msg = f"发现重复key ({len(unique_duplicates)}个): {', '.join(unique_duplicates[:10])}"
+                if len(unique_duplicates) > 10:
+                    error_msg += f"...还有 {len(unique_duplicates) - 10} 个"
+                logger.error(error_msg)
+                raise ValueError(error_msg)
             
             logger.info(f"成功从 {file_path} 加载 {len(blocks)} 个数据块")
             return blocks

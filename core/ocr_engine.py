@@ -4,6 +4,8 @@ import logging
 import re
 import os
 import io
+import json
+import time
 from typing import List
 
 from utils.config import ConfigManager
@@ -18,15 +20,22 @@ except ImportError:
     PYPDF2_AVAILABLE = False
     logger.warning("PyPDF2 not available, PDF splitting will not work")
 
+try:
+    from Cryptodome.Cipher import AES
+    PYCRYPTODOME_AVAILABLE = True
+except ImportError:
+    PYCRYPTODOME_AVAILABLE = False
+    logger.warning("PyCryptodome not available, encrypted PDF files may not work")
+
 class PaddleOCREngine:
     def __init__(self, config_path="config.yaml"):
         cfg = ConfigManager(config_path)
-        self.api_url = cfg.get("ocr.api_url", "https://ych83fn6yaveg1y3.aistudio-app.com/layout-parsing")
+        self.api_url = cfg.get("ocr.api_url", "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs")
         self.token = cfg.get("ocr.token", "52621de9cc8d22bd45e1cce14789b107191bebca")
         self.max_batch_pages = cfg.get("ocr.max_batch_pages", 90)
+        self.model = cfg.get("ocr.model", "PaddleOCR-VL-1.6")
         self.headers = {
-            "Authorization": f"token {self.token}",
-            "Content-Type": "application/json"
+            "Authorization": f"bearer {self.token}",
         }
 
     def process_pdf(self, file_path: str) -> List[TranslationBlock]:
@@ -40,7 +49,7 @@ class PaddleOCREngine:
         4. 日志页码严格使用处理前保存的区间，避免出现“91 到 90 页”。
         5. 分批失败时逐步缩小批大小，直到 1 页，提升健壮性。
         """
-        logger.info(f"开始使用 PaddleOCR-VL-1.5 处理 PDF: {file_path}")
+        logger.info(f"开始使用 {self.model} 处理 PDF: {file_path}")
 
         if not PYPDF2_AVAILABLE:
             logger.error("PyPDF2 not installed, cannot process PDF in batches")
@@ -152,7 +161,10 @@ class PaddleOCREngine:
                     pdf_bytes = self._extract_pages(file_path, start_page, end_page)
                 except Exception as e:
                     last_error = e
-                    logger.warning(f"提取第 {human_start} 到 {human_end} 页失败: {e}")
+                    if "PyCryptodome is required for AES algorithm" in str(e):
+                        logger.error(f"提取第 {human_start} 到 {human_end} 页失败: PDF文件可能已加密，需要安装PyCryptodome库。请运行: pip install pycryptodome")
+                    else:
+                        logger.warning(f"提取第 {human_start} 到 {human_end} 页失败: {e}")
                     continue
 
                 if not pdf_bytes:
@@ -236,42 +248,99 @@ class PaddleOCREngine:
         return output_buffer.read()
     
     def _process_pdf_batch(self, pdf_bytes: bytes, start_page: int, end_page: int, doc_name: str, page_offset: int) -> List[TranslationBlock]:
-        """处理一批 PDF 页面"""
-        file_data = base64.b64encode(pdf_bytes).decode("ascii")
-        
-        payload = {
-            "file": file_data,
-            "fileType": 0,                    # 0表示PDF文件
+        """处理一批 PDF 页面（使用 v1.6 API）"""
+        optional_payload = {
             "useDocOrientationClassify": False,
             "useDocUnwarping": False,
             "useChartRecognition": False,
-            "useLayoutDetection": True,       # 开启版面区域检测排序
-            "layoutNms": True,                # 开启NMS后处理移除重叠框
-            "restructurePages": True,         # 重构多页结果
-            "mergeTables": True,              # 跨页表格合并
-            "relevelTitles": True,            # 段落标题级别识别
-            "prettifyMarkdown": True,         # Markdown美化
-            "visualize": False                # 不返回图像，减少返回时间
         }
         
-        response = requests.post(self.api_url, json=payload, headers=self.headers)
-        response.raise_for_status()
+        data = {
+            "model": self.model,
+            "optionalPayload": json.dumps(optional_payload)
+        }
         
-        result = response.json().get("result", {})
-        layout_results = result.get("layoutParsingResults", [])
+        files = {"file": ("batch.pdf", pdf_bytes, "application/pdf")}
+        
+        job_response = requests.post(self.api_url, headers=self.headers, data=data, files=files)
+        job_response.raise_for_status()
+        
+        job_id = job_response.json()["data"]["jobId"]
+        logger.info(f"Job submitted successfully. job id: {job_id}")
+        
+        jsonl_url = self._poll_job_result(job_id)
+        
+        if not jsonl_url:
+            raise Exception("Failed to get result URL from job")
+        
+        jsonl_response = requests.get(jsonl_url)
+        jsonl_response.raise_for_status()
+        
+        lines = jsonl_response.text.strip().split('\n')
         
         all_blocks = []
-        for i, res in enumerate(layout_results):
-            # 计算实际页码（加上偏移量）
-            actual_page_num = page_offset + i + 1
-            markdown_data = res.get("markdown", {})
-            text = markdown_data.get("text", "")
+        # 使用全局页面计数器，确保页码从page_offset+1开始正确递增
+        global_page_counter = page_offset + 1
+        
+        for i, line in enumerate(lines, start=0):
+            line = line.strip()
+            if not line:
+                continue
             
-            # 解析Markdown文本为按"页码_段落序号"对应的结构块
-            page_blocks = self._parse_markdown_to_blocks(text, actual_page_num, doc_name)
-            all_blocks.extend(page_blocks)
+            result = json.loads(line)["result"]
+            layout_results = result.get("layoutParsingResults", [])
+            
+            # 处理每个页面的布局结果
+            # 使用全局页面计数器确保页码正确递增，避免多个layout_results共用同一页码
+            for j, res in enumerate(layout_results):
+                # 尝试从OCR结果中获取实际页码，如果没有则使用全局计数器
+                page_number = res.get("pageNumber") or res.get("page_number") or res.get("page")
+                if page_number:
+                    actual_page_num = int(page_number)
+                else:
+                    # 使用全局计数器，确保每个layout_result都有唯一的页码
+                    actual_page_num = global_page_counter
+                
+                # 递增全局计数器，为下一个页面准备
+                global_page_counter += 1
+                
+                markdown_data = res.get("markdown", {})
+                text = markdown_data.get("text", "")
+                
+                page_blocks = self._parse_markdown_to_blocks(text, actual_page_num, doc_name)
+                all_blocks.extend(page_blocks)
         
         return all_blocks
+    
+    def _poll_job_result(self, job_id: str) -> str:
+        """轮询获取 OCR 任务结果"""
+        while True:
+            job_result_response = requests.get(f"{self.api_url}/{job_id}", headers=self.headers)
+            job_result_response.raise_for_status()
+            
+            data = job_result_response.json()["data"]
+            state = data["state"]
+            
+            if state == 'pending':
+                logger.info("The current status of the job is pending")
+            elif state == 'running':
+                try:
+                    total_pages = data['extractProgress']['totalPages']
+                    extracted_pages = data['extractProgress']['extractedPages']
+                    logger.info(f"The current status of the job is running, total pages: {total_pages}, extracted pages: {extracted_pages}")
+                except KeyError:
+                    logger.info("The current status of the job is running...")
+            elif state == 'done':
+                extracted_pages = data['extractProgress']['extractedPages']
+                start_time = data['extractProgress']['startTime']
+                end_time = data['extractProgress']['endTime']
+                logger.info(f"Job completed, successfully extracted pages: {extracted_pages}, start time: {start_time}, end time: {end_time}")
+                return data['resultUrl']['jsonUrl']
+            elif state == "failed":
+                error_msg = data['errorMsg']
+                raise Exception(f"Job failed, failure reason: {error_msg}")
+            
+            time.sleep(5)
 
     def _parse_markdown_to_blocks(self, text: str, page_num: int, doc_name: str) -> List[TranslationBlock]:
         """

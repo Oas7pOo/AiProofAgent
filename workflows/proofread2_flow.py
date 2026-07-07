@@ -95,8 +95,9 @@ class Proofread2Workflow:
 
     def build_batches(self, max_blocks: int = 10, max_chars: int = 8000) -> int:
         """将待二校的数据分组装载至处理队列"""
-        # 处理所有未二校的数据块（stage < 2），不强制要求必须经过一校
-        pending = [b for b in self.blocks if b.stage < 2]
+        # 处理所有未二校的数据块（stage < 2），但跳过 proofread_zh == "[AI_ERROR]" 的块
+        # 这些块会在下一次从存档继续时重新尝试
+        pending = [b for b in self.blocks if b.stage < 2 and b.proofread_zh != "[AI_ERROR]"]
         self.pending_queue = []
         
         current_batch = []
@@ -146,8 +147,8 @@ class Proofread2Workflow:
             "你是中文 D&D 译文二校员。你熟悉dnd的中文翻译与术语，基于当前翻译稿件与质量不好的一校给出的译文与建议做最终二校，确保术语一致、语义准确、中文自然。\n"
             "\n"
             "【术语约束】\n"
-            "1) 旧术语表为最高优先级（若旧术语命中，必须使用旧术语的译名）。\n"
-            "2) 新术语建议仅在旧术语未覆盖时可参考，其中可能有误。\n"
+            "1) 优先遵循旧术语表。\n"
+            "2) 新术语建议仅在旧术语未覆盖时参考，用于保持人名等翻译一致。\n"
             "\n"
             "【需要二校的块】\n"
             + "\n".join(blocks)
@@ -164,8 +165,10 @@ class Proofread2Workflow:
         )
         return prompt
 
-    def request_llm(self, prompt: str) -> str:
+    def request_llm(self, prompt: str, rate_limiter=None) -> str:
         """向 LLM 发起请求并提取 JSON"""
+        if rate_limiter:
+            rate_limiter.acquire()
         system_prompt = "你是一个严谨的翻译校对助手。请只输出合法的 JSON 数组结构，不要包含 markdown 代码块标记。"
         resp = self.llm_engine.request_prompt(prompt, system_prompt=system_prompt)
         resp = re.sub(r'^```[jJ]son\s*', '', resp.strip())
@@ -233,6 +236,10 @@ class Proofread2Workflow:
         for b in batch:
             res = data_map.get(str(b.key))
             if res:
+                # 幂等性检查：如果块已经完成二校，则跳过
+                if b.stage >= 2:
+                    logger.info(f"跳过已处理的块: {b.key}")
+                    continue
                 b.proofread_zh = res.get("proofread_zh", "")
                 b.proofread_note = res.get("proofread_note", "")
                 b.stage = 2
@@ -289,10 +296,10 @@ class Proofread2Workflow:
                     error_callback(e)
         threading.Thread(target=_task, daemon=True).start()
 
-    def _process_batch(self, batch: List[TranslationBlock]) -> List[TranslationBlock]:
+    def _process_batch(self, batch: List[TranslationBlock], rate_limiter=None) -> List[TranslationBlock]:
         """处理一个批次的块，包含失败重试和任务拆分机制"""
         logger.info(f"[DEBUG] _process_batch开始，批次大小={len(batch)}")
-        result = self._process_recursive(batch, depth=0)
+        result = self._process_recursive(batch, depth=0, rate_limiter=rate_limiter)
         logger.info(f"[DEBUG] _process_recursive完成，开始保存状态")
         # 处理完一个批次后保存状态
         FormatConverter.save_to_json(self.blocks, self.archive_path, self.old_terms, self.new_terms)
@@ -300,7 +307,7 @@ class Proofread2Workflow:
         logger.info(f"已保存批次处理状态到: {self.archive_path}")
         return result
 
-    def _process_recursive(self, batch: List[TranslationBlock], depth: int = 0) -> List[TranslationBlock]:
+    def _process_recursive(self, batch: List[TranslationBlock], depth: int = 0, rate_limiter=None) -> List[TranslationBlock]:
         if not batch:
             return batch
         
@@ -313,7 +320,7 @@ class Proofread2Workflow:
                 logger.info(f"[DEBUG] [Depth={depth}] prompt构建完成，长度={len(prompt)}")
                 
                 logger.info(f"[DEBUG] [Depth={depth}] 开始request_llm")
-                response = self.request_llm(prompt)
+                response = self.request_llm(prompt, rate_limiter=rate_limiter)
                 logger.info(f"[DEBUG] [Depth={depth}] request_llm完成，响应长度={len(response)}")
                 
                 logger.info(f"[DEBUG] [Depth={depth}] 开始parse_and_validate")
@@ -335,10 +342,7 @@ class Proofread2Workflow:
                     raise
                 
                 if attempt < MAX_RETRIES - 1:
-                    # 关键修改：重试等待时间使用配置值
-                    retry_wait = self.runner.delay_seconds if self.runner.delay_seconds > 0 else 2
-                    logger.warning(f"[Depth={depth}] 二校请求失败，{retry_wait} 秒后重试: {e}")
-                    time.sleep(retry_wait)
+                    logger.warning(f"[Depth={depth}] 二校请求失败，准备进行第 {attempt+1} 次重试: {e}")
                 else:
                     logger.error(f"[Depth={depth}] 二校重试失败: {e}")
         
@@ -347,13 +351,13 @@ class Proofread2Workflow:
             mid = len(batch) // 2
             left, right = batch[:mid], batch[mid:]
             logger.info(f"[Depth={depth}] 批次拆分: {len(left)} + {len(right)}")
-            return self._process_recursive(left, depth + 1) + self._process_recursive(right, depth + 1)
+            return self._process_recursive(left, depth + 1, rate_limiter) + self._process_recursive(right, depth + 1, rate_limiter)
         
-        # 单条失败：标记为错误
+        # 单条失败：标记为错误但保持 stage=1，以便下次从存档继续时重试
         block = batch[0]
         logger.error(f"[Depth={depth}] 单条失败: {block.key}")
         block.proofread_note = "[SYSTEM] Processing failed after max retries"
         block.proofread_zh = "[AI_ERROR]"
-        block.stage = 2  # 标记为已处理（错误）
-        
+        block.stage = 1  # 保持 stage=1，下次存档继续时可重试
+
         return batch

@@ -481,6 +481,10 @@ class Proof2Tab(ttk.Frame):
         self.btn_auto.config(state="disabled")
         self.btn_start.config(state="disabled")
         self.btn_batch.config(state="disabled")  # 自动校对时禁用批量按钮
+        
+        from workflows.base_runner import RateLimiter
+        delay_seconds = self.workflow.delay_seconds if self.workflow else 10
+        self.rate_limiter = RateLimiter(delay_seconds)
 
         t = threading.Thread(target=self._auto_loop, daemon=True)
         t.start()
@@ -597,8 +601,8 @@ class Proof2Tab(ttk.Frame):
             try:
                 # 构建prompt
                 prompt = self.workflow.build_prompt_for_batch(batch)
-                # 发送请求
-                response = self.workflow.request_llm(prompt)
+                # 发送请求（带速率限制）
+                response = self.workflow.request_llm(prompt, self.rate_limiter)
                 last_raw = response
                 # 验证结果
                 valid, msg, data = self.workflow.parse_and_validate(batch, response)
