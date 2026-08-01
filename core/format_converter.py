@@ -3,7 +3,9 @@ import csv
 import logging
 import re
 import os
+import random
 import threading
+from datetime import datetime
 from typing import List, Optional, Dict, Any
 from dataclasses import asdict
 
@@ -33,11 +35,13 @@ class FormatConverter:
     def save_to_json(blocks: List[TranslationBlock], file_path: str, old_terms: Optional[TermManager] = None, new_terms: Optional[TermManager] = None):
         """将一校/二校中的 TranslationBlock 列表保存为 JSON 文件，用于中断恢复"""
         # 获取文件锁，防止并发写入冲突
-        file_lock = _get_file_lock(file_path)
+        normalized_path = os.path.abspath(file_path)
+        file_lock = _get_file_lock(normalized_path)
         with file_lock:
             try:
                 # 确保目标目录存在
-                os.makedirs(os.path.dirname(file_path), exist_ok=True)
+                output_dir = os.path.dirname(normalized_path)
+                os.makedirs(output_dir, exist_ok=True)
                 
                 # 提取术语信息
                 old_terms_entries = []
@@ -62,7 +66,7 @@ class FormatConverter:
                 data = {
                     "meta": {
                         "stage": "proofread1",
-                        "saved_at": "2026-04-02"
+                        "saved_at": datetime.now().astimezone().isoformat(timespec="seconds")
                     },
                     "terms": {
                         "old_terms": old_terms_entries,
@@ -72,7 +76,7 @@ class FormatConverter:
                 }
                 
                 # 使用临时文件 + 原子重命名，确保线程安全和文件完整性
-                temp_file = file_path + '.tmp'
+                temp_file = normalized_path + '.tmp'
                 with open(temp_file, 'w', encoding='utf-8') as f:
                     json.dump(data, f, ensure_ascii=False, indent=2)
                 
@@ -81,7 +85,7 @@ class FormatConverter:
                 max_retries = 30
                 for attempt in range(max_retries):
                     try:
-                        os.replace(temp_file, file_path)
+                        os.replace(temp_file, normalized_path)
                         break
                     except PermissionError as e:
                         if attempt < max_retries - 1:
@@ -90,7 +94,7 @@ class FormatConverter:
                         else:
                             raise
                 
-                logger.info(f"成功保存 {len(blocks)} 个数据块状态到 {file_path}")
+                logger.info(f"成功保存 {len(blocks)} 个数据块状态到 {normalized_path}")
             except Exception as e:
                 logger.error(f"保存 JSON 失败: {e}")
                 raise
@@ -124,7 +128,7 @@ class FormatConverter:
                     if "translation" in item:
                         filtered_item["zh_block"] = item["translation"]
                     # 复制其他字段
-                    for key in ["key", "page", "block_num", "en_block", "zh_block", "proofread1_zh", "proofread1_note", "new_terms", "proofread_zh", "proofread_note", "stage"]:
+                    for key in ["key", "page", "block_num", "en_block", "zh_block", "proofread1_zh", "proofread1_note", "proofread1_retry_count", "new_terms", "proofread_zh", "proofread_note", "stage"]:
                         if key in item:
                             filtered_item[key] = item[key]
                     # 创建 TranslationBlock 实例
@@ -373,31 +377,6 @@ class FormatConverter:
             return blocks
         else:
             raise ValueError(f"不支持的文件格式: {file_path}")
-    
-    @staticmethod
-    def export_to_js(blocks: List[TranslationBlock], file_path: str):
-        """
-        将数据导出为 JS 文件，格式为 const translations = [...]
-        """
-        try:
-            js_data = []
-            for block in blocks:
-                # 使用最高完成度的译文
-                translation = block.proofread_zh or block.proofread1_zh or block.zh_block or ""
-                js_data.append({
-                    "key": block.key,
-                    "original": block.en_block,
-                    "translation": translation,
-                    "stage": block.stage
-                })
-            
-            js_content = f"const translations = {json.dumps(js_data, ensure_ascii=False, indent=2)};"
-            with open(file_path, 'w', encoding='utf-8') as f:
-                f.write(js_content)
-            logger.info(f"成功导出 JS 文件至: {file_path}")
-        except Exception as e:
-            logger.error(f"导出 JS 失败: {e}")
-            raise
     
     @staticmethod
     def export_new_terms(blocks: List[TranslationBlock], file_path: str):

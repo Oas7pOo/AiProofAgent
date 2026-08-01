@@ -57,7 +57,7 @@ def chat_completions():
         
         ui_update_queue.put('update')
         
-        if not req_info['event'].wait(timeout=300):
+        if not req_info['event'].wait(timeout=60000):
             return jsonify(generate_openai_chat_response("[SYSTEM] 请求超时，未收到人工回复")), 504
         
         if req_info['response'] is None:
@@ -194,6 +194,20 @@ def on_request_select(event):
                 response_text.delete("1.0", tk.END)
                 response_text.insert("1.0", req['response'])
 
+def copy_request_detail():
+    if not root or not request_detail:
+        return
+
+    detail = request_detail.get("1.0", "end-1c")
+    if not detail:
+        messagebox.showwarning("提示", "请先选择一个请求")
+        return
+
+    root.clipboard_clear()
+    root.clipboard_append(detail)
+    root.update()
+    messagebox.showinfo("成功", "请求详情已复制到剪贴板")
+
 def submit_response():
     global selected_request_id
     
@@ -279,6 +293,14 @@ def create_gui():
     
     request_detail = scrolledtext.ScrolledText(left_frame, wrap=tk.WORD, height=20)
     request_detail.pack(fill=tk.BOTH, expand=True, padx=5)
+
+    request_detail_button_frame = ttk.Frame(left_frame)
+    request_detail_button_frame.pack(fill=tk.X, padx=5, pady=(5, 0))
+    ttk.Button(
+        request_detail_button_frame,
+        text="复制请求内容",
+        command=copy_request_detail,
+    ).pack(side=tk.RIGHT)
     
     ttk.Label(right_frame, text="回复内容", font=('Arial', 12, 'bold')).pack(pady=5)
     

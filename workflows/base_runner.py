@@ -34,15 +34,6 @@ class BatchTaskRunner:
     def run_sync(self, batches: List[Any], func: Callable[[Any, RateLimiter], Any], on_progress=None, on_complete=None, on_error=None):
         return self._run(batches, func, on_progress, on_complete, on_error)
 
-    def run_async(self, batches, func, on_progress=None, on_complete=None, on_error=None):
-        thread = threading.Thread(
-            target=self._run,
-            args=(batches, func, on_progress, on_complete, on_error),
-            daemon=True,
-        )
-        thread.start()
-        return thread
-
     def _run(self, batches, func, on_progress=None, on_complete=None, on_error=None):
         total = len(batches)
         if total == 0:

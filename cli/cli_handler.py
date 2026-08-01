@@ -1,35 +1,47 @@
-import argparse
-import os
+from pathlib import Path
+
+from core.format_converter import FormatConverter
 from workflows.proofread1_flow import Proofread1Workflow
 from workflows.proofread2_flow import Proofread2Workflow
-from core.format_converter import FormatConverter
-from utils.config import ConfigManager
-import logging
 
-logger = logging.getLogger("AiProofAgent.CLI")
 
-def parse_args():
-    p = argparse.ArgumentParser(description="AiProofAgent CLI")
-    p.add_argument("--in-pdf", help="Input PDF path (OCR)")
-    p.add_argument("--in-json", help="Input JSON state path (Resume/Stage2)")
-    p.add_argument("--config", default="config.yaml", help="Config path")
-    p.add_argument("--run-proof2", action="store_true", help="Perform second proofread")
-    p.add_argument("--export-md", help="Export to Markdown path")
-    return p.parse_args()
+def run_cli_task(args) -> None:
+    errors = []
 
-def run_cli_task(config_path="config.yaml"):
-    args = parse_args()
-    cfg = ConfigManager(config_path)
-
-    logger.info("启动命令行模式 (简化版)...")
     if args.in_pdf:
-        logger.info("执行一校任务...")
-        out_path = args.in_pdf.replace('.pdf', '_state.json')
-        Proofread1Workflow(config_path).execute_async(file_path=args.in_pdf, out_path=out_path, is_pdf=True)
-        
+        source_path = Path(args.in_pdf)
+        output_path = Path(args.out_json) if args.out_json else (
+            source_path.with_name(f"{source_path.stem}_state.json")
+        )
+
+        workflow = Proofread1Workflow(args.config)
+        worker = workflow.execute_async(
+            file_path=str(source_path),
+            out_path=str(output_path),
+            is_pdf=True,
+            error_callback=errors.append,
+        )
+        worker.join()
+
+        if errors:
+            raise errors[0]
+
     if args.in_json and args.run_proof2:
-        logger.info("执行二校任务...")
-        Proofread2Workflow(config_path).execute_async(file_path=args.in_json)
+        source_path = Path(args.in_json)
+        output_path = Path(args.out_json) if args.out_json else (
+            source_path.with_name(f"{source_path.stem}_proof2.json")
+        )
+
+        workflow = Proofread2Workflow(args.config)
+        workflow.init_session(
+            archive_path=str(output_path),
+            stage1_path=str(source_path),
+        )
+        worker = workflow.run_bulk_async(error_callback=errors.append)
+        worker.join()
+
+        if errors:
+            raise errors[0]
 
     if args.export_md and args.in_json:
         blocks, _, _ = FormatConverter.load_from_json(args.in_json)

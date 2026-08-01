@@ -72,8 +72,9 @@ class Proof2Tab(ttk.Frame):
                     exts.add(token[1:])
         return list(exts)[0] if len(exts) == 1 else ""
 
-    def __init__(self, parent):
+    def __init__(self, parent, config_path: str = "config.yaml"):
         super().__init__(parent)
+        self.config_path = config_path
 
         # ---------------- state ----------------
         self.cfg = None
@@ -365,7 +366,7 @@ class Proof2Tab(ttk.Frame):
             # 开始校对按钮只在加载文件时使用，点击后立即永久禁用
             self.btn_start.config(state="disabled")
             
-            self.cfg = ConfigManager()
+            self.cfg = ConfigManager(self.config_path)
             
             # 读取配置参数
             max_workers = int(self.cfg.get("llm.ai_max_workers", 1))
@@ -378,6 +379,7 @@ class Proof2Tab(ttk.Frame):
             
             # 初始化工作流，传递配置参数
             self.workflow = Proofread2Workflow(
+                self.config_path,
                 max_workers=start_auto_max_workers,
                 delay_seconds=delay_seconds,
                 max_blocks=max_blocks,
@@ -514,6 +516,7 @@ class Proof2Tab(ttk.Frame):
             try:
                 # 重新初始化工作流，使用配置的并发数
                 self.workflow = Proofread2Workflow(
+                    self.config_path,
                     max_workers=max_workers,
                     delay_seconds=delay_seconds,
                     max_blocks=max_blocks,

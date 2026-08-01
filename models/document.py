@@ -16,6 +16,7 @@ class TranslationBlock:
     # 一校产物
     proofread1_zh: str = ""        
     proofread1_note: str = ""
+    proofread1_retry_count: int = 0
     new_terms: List[Dict[str, str]] = field(default_factory=list)
   
     # 二校产物

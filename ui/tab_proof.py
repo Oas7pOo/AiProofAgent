@@ -2,7 +2,6 @@
 import tkinter as tk
 from tkinter import ttk, filedialog, scrolledtext, messagebox
 import threading
-import sys
 import os
 import glob
 import json
@@ -10,7 +9,6 @@ from datetime import datetime
 import logging
 
 from workflows.proofread1_flow import Proofread1Workflow
-from utils.config import ConfigManager
 from core.format_converter import FormatConverter
 from ui.gui_logger import setup_gui_logger
 
@@ -19,8 +17,9 @@ logger = logging.getLogger("AiProofAgent.RunTab")
 
 
 class RunTab(ttk.Frame):
-    def __init__(self, parent):
+    def __init__(self, parent, config_path: str = "config.yaml"):
         super().__init__(parent)
+        self.config_path = config_path
         self.pack(fill="both", expand=True, padx=10, pady=10)
 
         self.is_running = False
@@ -324,7 +323,7 @@ class RunTab(ttk.Frame):
         self.btn_stop.config(state="disabled")
 
     def _bg_run(self, mode, f_src, f_arc, f_term):
-        workflow = Proofread1Workflow()
+        workflow = Proofread1Workflow(self.config_path)
 
         def _done_cb(blocks):
             self._mark_archive_completed(f_arc)
@@ -479,31 +478,9 @@ class RunTab(ttk.Frame):
             return
 
         try:
-            # 导入所需模块
-            import io
-            from core.format_converter import FormatConverter
             from core.md2doc import parse_and_convert
-            
-            # 1. 加载数据
             blocks, _, _ = FormatConverter.load_from_json(f_arc)
-            
-            # 2. 生成 Markdown 内容到内存
-            md_buffer = io.StringIO()
-            
-            # 临时重定向文件写入到内存缓冲区
-            original_open = open
-            def mock_open(path, *args, **kwargs):
-                if path == out_doc.replace('.docx', '.md'):
-                    return md_buffer
-                return original_open(path, *args, **kwargs)
-            
-            # 使用 StringIO 来捕获 Markdown 内容
-            import sys
-            
-            # 生成 Markdown 内容
             md_content = self._generate_markdown_content(blocks, is_proof2=False)
-            
-            # 3. 转换为 DOC
             parse_and_convert(md_content, out_doc, is_proof2=False)
             
             messagebox.showinfo("成功", f"已导出：\n{os.path.basename(out_doc)}")

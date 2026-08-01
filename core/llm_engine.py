@@ -60,7 +60,7 @@ class LlmEngine:
             response = self.session.post(
                 url,
                 json=payload,
-                timeout=timeout or self.timeout
+                timeout=(30, self.timeout)
             )
             
             logger.info(f"响应状态码: {response.status_code}")

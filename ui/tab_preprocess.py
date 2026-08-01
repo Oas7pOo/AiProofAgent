@@ -2,14 +2,12 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
 import threading
 import os
-import sys
 import csv
 import json
 
 # 引入业务逻辑
 from core.ocr_engine import PaddleOCREngine
 from core.format_converter import FormatConverter
-from utils.config import ConfigManager
 from ui.gui_logger import setup_gui_logger
 import logging
 
@@ -36,8 +34,9 @@ class PreprocessTab(ttk.Frame):
                     exts.add(token[1:])
         return list(exts)[0] if len(exts) == 1 else ""
 
-    def __init__(self, parent):
+    def __init__(self, parent, config_path: str = "config.yaml"):
         super().__init__(parent)
+        self.config_path = config_path
         self.pack(fill='both', expand=True, padx=15, pady=15)
         
         # === 状态变量 ===
@@ -206,7 +205,7 @@ class PreprocessTab(ttk.Frame):
                 logger.info(f"输入: {p_in}")
                 logger.info("正在初始化 OCR 引擎...")
                 
-                ocr_engine = PaddleOCREngine()
+                ocr_engine = PaddleOCREngine(self.config_path)
                 blocks = ocr_engine.process_pdf(p_in)
                 
                 if fmt == "json":

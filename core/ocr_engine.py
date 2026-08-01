@@ -31,7 +31,7 @@ class PaddleOCREngine:
     def __init__(self, config_path="config.yaml"):
         cfg = ConfigManager(config_path)
         self.api_url = cfg.get("ocr.api_url", "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs")
-        self.token = cfg.get("ocr.token", "52621de9cc8d22bd45e1cce14789b107191bebca")
+        self.token = cfg.get("ocr.token")
         self.max_batch_pages = cfg.get("ocr.max_batch_pages", 90)
         self.model = cfg.get("ocr.model", "PaddleOCR-VL-1.6")
         self.headers = {

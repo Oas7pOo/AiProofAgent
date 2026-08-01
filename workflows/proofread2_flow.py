@@ -11,6 +11,7 @@ from core.term_manager import TermManager
 from core.utils import match_terms_for_block, format_terms
 from models.term import TermEntry
 from models.document import TranslationBlock
+from utils.llm_json_parser import LlmJsonParseError, parse_llm_rows
 from workflows.base_runner import BatchTaskRunner
 
 
@@ -178,7 +179,13 @@ class Proofread2Workflow:
     def parse_and_validate(self, batch: List[TranslationBlock], text: str) -> Tuple[bool, str, List[Dict]]:
         """校验返回的 JSON 是否格式完好且与原区块一一对应"""
         try:
-            data = json.loads(text)
+            data, parse_mode = parse_llm_rows(
+                text,
+                [str(block.key) for block in batch],
+                include_new_terms=False,
+                allow_merge=False,
+            )
+            logger.info("二校响应解析成功，模式=%s", parse_mode)
             if not isinstance(data, list):
                 return False, "返回的结果不是 JSON 数组", []
             if len(data) != len(batch):
@@ -193,7 +200,7 @@ class Proofread2Workflow:
         except Exception as e:
             # JSON 解析失败，尝试通过正则表达式提取数据
             logger.warning(f"JSON 解析失败，尝试正则提取: {e}")
-            extracted_data = self._extract_data_from_text(text, batch)
+            extracted_data = []
             if extracted_data:
                 logger.info(f"正则提取成功，提取到 {len(extracted_data)} 条数据")
                 return True, "Success (regex extracted)", extracted_data
@@ -294,7 +301,9 @@ class Proofread2Workflow:
                 logger.error(f"二校流水线发生致命错误: {e}", exc_info=True)
                 if error_callback:
                     error_callback(e)
-        threading.Thread(target=_task, daemon=True).start()
+        worker = threading.Thread(target=_task, daemon=True)
+        worker.start()
+        return worker
 
     def _process_batch(self, batch: List[TranslationBlock], rate_limiter=None) -> List[TranslationBlock]:
         """处理一个批次的块，包含失败重试和任务拆分机制"""

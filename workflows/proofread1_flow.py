@@ -13,6 +13,7 @@ from core.term_manager import TermManager
 from core.utils import match_terms_for_block, format_terms
 from models.document import TranslationBlock
 from models.term import TermEntry
+from utils.llm_json_parser import LlmJsonParseError, parse_llm_rows
 from workflows.base_runner import BatchTaskRunner
 
 logger = logging.getLogger("AiProofAgent.Proofread1")
@@ -114,7 +115,18 @@ class Proofread1Workflow:
                 self.blocks = blocks
                 
                 # 2. 筛选未完成一校的块
-                pending_blocks = [b for b in blocks if b.stage < 1]
+                pending_blocks = [
+                    block
+                    for block in blocks
+                    if (
+                        block.stage < 1
+                        or (
+                            block.stage == 1
+                            and block.proofread1_zh == "[AI_ERROR]"
+                            and block.proofread1_retry_count < 1
+                        )
+                    )
+                ]
                 logger.info(f"任务分析完毕: 共 {len(blocks)} 个片段，需处理 {len(pending_blocks)} 个片段。")
 
                 # 3. 分批处理
@@ -164,7 +176,9 @@ class Proofread1Workflow:
                     error_callback(e)
 
         # 在后台线程中独立运行，不阻塞主线程
-        threading.Thread(target=_task, daemon=True).start()
+        worker = threading.Thread(target=_task, daemon=True)
+        worker.start()
+        return worker
 
     def _build_batches(self, blocks: List[TranslationBlock]) -> List[List[TranslationBlock]]:
         """根据 max_blocks 和 max_chars 构建批次"""
@@ -266,7 +280,13 @@ class Proofread1Workflow:
                 
                 # 解析和验证 JSON
                 try:
-                    result_data = json.loads(json_str)
+                    result_data, parse_mode = parse_llm_rows(
+                        json_str,
+                        [str(block.key) for block in batch],
+                        include_new_terms=True,
+                        allow_merge=False,
+                    )
+                    logger.info("一校响应解析成功，模式=%s", parse_mode)
                     
                     # 验证返回结果是否为列表
                     if not isinstance(result_data, list):
@@ -284,14 +304,21 @@ class Proofread1Workflow:
                     
                     # 处理返回结果
                     # 创建块映射，方便查找
-                    block_map = {block.key: block for block in batch}
+                    block_map = {str(block.key): block for block in batch}
                     
                     for item in result_data:
-                        block_id = item.get("BLOCK_ID")
-                        if block_id and block_id in block_map:
+                        block_id = str(item.get("BLOCK_ID", "")).strip()
+                        if block_id in block_map:
                             block = block_map[block_id]
+                            retrying_ai_error = (
+                                block.proofread1_zh == "[AI_ERROR]"
+                                and block.proofread1_retry_count < 1
+                            )
+                            if block.stage >= 1 and not retrying_ai_error:
+                                logger.info(f"跳过已处理的块: {block.key}")
+                                continue
                             # 幂等性检查：如果块已经完成一校，则跳过
-                            if block.stage >= 1:
+                            if block.stage >= 1 and not retrying_ai_error:
                                 logger.info(f"跳过已处理的块: {block.key}")
                                 continue
                             block.proofread1_zh = item.get("proofread_zh", "")
@@ -316,6 +343,8 @@ class Proofread1Workflow:
                                             ))
                                 # 重新构建 matcher
                                 self.new_terms._build_matchers()
+                            if retrying_ai_error:
+                                block.proofread1_retry_count += 1
                             block.stage = 1  # 标记完成一校
                     
                     return batch
@@ -323,17 +352,24 @@ class Proofread1Workflow:
                 except Exception as e:
                     # JSON 解析失败，尝试通过正则表达式提取数据
                     logger.warning(f"JSON 解析失败，尝试正则提取: {e}")
-                    extracted_data = self._extract_data_from_text(json_str, batch)
+                    extracted_data = []
                     if extracted_data:
                         logger.info(f"正则提取成功，提取到 {len(extracted_data)} 条数据")
                         # 处理提取的数据
-                        block_map = {block.key: block for block in batch}
+                        block_map = {str(block.key): block for block in batch}
                         for item in extracted_data:
-                            block_id = item.get("BLOCK_ID")
-                            if block_id and block_id in block_map:
+                            block_id = str(item.get("BLOCK_ID", "")).strip()
+                            if block_id in block_map:
                                 block = block_map[block_id]
+                                retrying_ai_error = (
+                                    block.proofread1_zh == "[AI_ERROR]"
+                                    and block.proofread1_retry_count < 1
+                                )
+                                if block.stage >= 1 and not retrying_ai_error:
+                                    logger.info(f"跳过已处理的块: {block.key}")
+                                    continue
                                 # 幂等性检查：如果块已经完成一校，则跳过
-                                if block.stage >= 1:
+                                if block.stage >= 1 and not retrying_ai_error:
                                     logger.info(f"跳过已处理的块: {block.key}")
                                     continue
                                 block.proofread1_zh = item.get("proofread_zh", "")
@@ -355,6 +391,8 @@ class Proofread1Workflow:
                                                     note=note
                                                 ))
                                     self.new_terms._build_matchers()
+                                if retrying_ai_error:
+                                    block.proofread1_retry_count += 1
                                 block.stage = 1
                         return batch
                     
@@ -382,10 +420,16 @@ class Proofread1Workflow:
         
         # 单条失败：标记为错误
         block = batch[0]
+        was_resume_retry = (
+            block.proofread1_zh == "[AI_ERROR]"
+            and block.proofread1_retry_count < 1
+        )
         logger.error(f"[Depth={depth}] 单条失败: {block.key}")
         block.proofread1_note = "[SYSTEM] Processing failed after max retries"
         block.proofread1_zh = "[AI_ERROR]"
         block.stage = 1  # 标记为已处理（错误）
+        if was_resume_retry:
+            block.proofread1_retry_count += 1
         
         return batch
     
@@ -432,4 +476,3 @@ class Proofread1Workflow:
     
 
 
-    

@@ -3,8 +3,9 @@ from tkinter import ttk, messagebox
 from utils.config import ConfigManager
 
 class SettingsTab(ttk.Frame):
-    def __init__(self, parent):
+    def __init__(self, parent, config_path: str = "config.yaml"):
         super().__init__(parent)
+        self.config_path = config_path
         self.pack(fill='both', expand=True, padx=20, pady=20)
         self.vars = {}
         self.setup_ui()
@@ -39,14 +40,14 @@ class SettingsTab(ttk.Frame):
         ttk.Button(self, text="保存配置", command=self.save).pack(pady=20)
 
     def refresh(self):
-        cfg_mgr = ConfigManager()
+        cfg_mgr = ConfigManager(self.config_path)
         for key, var in self.vars.items():
             val = cfg_mgr.get(key, "")
             var.set(str(val))
 
     def save(self):
         try:
-            cfg_mgr = ConfigManager()
+            cfg_mgr = ConfigManager(self.config_path)
             # 直接使用ConfigManager的set方法，它会自动处理嵌套路径
             for key, var in self.vars.items():
                 val = var.get().strip()
