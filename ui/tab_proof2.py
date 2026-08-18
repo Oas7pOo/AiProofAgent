@@ -599,13 +599,18 @@ class Proof2Tab(ttk.Frame):
         # 1) 尝试 3 次
         last_raw = ""
         last_err = ""
+        rate_limiter = getattr(self, "rate_limiter", None)
 
         for _ in range(3):
+            request_started = False
             try:
                 # 构建prompt
                 prompt = self.workflow.build_prompt_for_batch(batch)
-                # 发送请求（带速率限制）
-                response = self.workflow.request_llm(prompt, self.rate_limiter)
+                # 请求前执行全局发送间隔限制
+                if rate_limiter:
+                    rate_limiter.acquire()
+                request_started = True
+                response = self.workflow.request_llm(prompt)
                 last_raw = response
                 # 验证结果
                 valid, msg, data = self.workflow.parse_and_validate(batch, response)
@@ -630,6 +635,9 @@ class Proof2Tab(ttk.Frame):
 
             except Exception as e:
                 last_err = str(e)
+            finally:
+                if request_started and rate_limiter:
+                    rate_limiter.mark_response_processed()
 
         # 2) 仍失败：减半或暂停
         self.after(0, lambda txt=last_raw: self._set_resp_text(txt))

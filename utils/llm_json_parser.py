@@ -35,20 +35,24 @@ def clean_llm_text(text: str) -> str:
     text = re.sub(r"^\s*```(?:json)?\s*", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\s*```\s*$", "", text)
 
-    decoder = json.JSONDecoder()
-    for start, char in enumerate(text):
-        if char != "[":
-            continue
+    # 仅认定第一个“数组内对象”作为 LLM 的外层响应。
+    # 当外层 JSON 被未转义 HTML 引号破坏时，绝不能继续扫描并误把
+    # new_terms 等内层合法数组截取出来，否则会丢失 BLOCK_ID。
+    match = re.search(r"\[\s*\{", text)
+    if not match:
+        return text.strip()
 
-        try:
-            value, end = decoder.raw_decode(text[start:])
-        except json.JSONDecodeError:
-            continue
+    candidate = text[match.start():]
+    try:
+        value, end = json.JSONDecoder().raw_decode(candidate)
+    except json.JSONDecodeError:
+        # 保留不合法的整个外层响应，交给 BLOCK_ID 隔离式容错解析。
+        return candidate.strip()
 
-        if isinstance(value, list):
-            return text[start:start + end]
+    if isinstance(value, list):
+        return candidate[:end]
 
-    return text.strip()
+    return candidate.strip()
 
 
 def decode_backslash_escapes(value: str) -> str:

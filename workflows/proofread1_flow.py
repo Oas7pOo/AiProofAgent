@@ -13,6 +13,7 @@ from core.term_manager import TermManager
 from core.utils import match_terms_for_block, format_terms
 from models.document import TranslationBlock
 from models.term import TermEntry
+from utils.html_placeholders import build_batch_prompt_context
 from utils.llm_json_parser import LlmJsonParseError, parse_llm_rows
 from workflows.base_runner import BatchTaskRunner
 
@@ -219,15 +220,17 @@ class Proofread1Workflow:
             return batch
         
         MAX_RETRIES = 3
+        batch_context = build_batch_prompt_context(batch)
         
         for attempt in range(MAX_RETRIES):
+            request_started = False
             try:
                 # 系统提示
                 system_prompt = "你是一个严谨的本地化校对专家。你的任务是根据参考术语校对原文和译文。"
                 
                 # 构建批次 prompt
                 blocks_text = []
-                for block in batch:
+                for alias, block in batch_context.block_by_alias.items():
                     # 为每个块单独匹配术语（一校只使用旧术语）
                     block_old_hits, _ = match_terms_for_block(block, self.old_terms, self.new_terms)
                     
@@ -235,8 +238,8 @@ class Proofread1Workflow:
                     block_old_terms_str = format_terms(block_old_hits)
                     
                     blocks_text.append(
-                        f"""--- BLOCK_ID: {block.key} ---
-原文: {block.en_block}
+                        f"""--- BLOCK_ID: {alias} ---
+原文: {batch_context.source_by_alias[alias]}
 原译文: {block.zh_block}
 参考术语: {block_old_terms_str}
 """)
@@ -249,10 +252,12 @@ class Proofread1Workflow:
 
 【处理逻辑 - 请严格遵守】
 对于每一个 Block
-- proofread_zh：输出修正后的译文，如原译文缺失则此处为翻译。HTML 标签中的引号冲突必须对内部的引号进行转义。
+- BLOCK_ID：必须原样复制输入的短 ID，例如 BLOCK_001，不得改写。
+- proofread_zh：输出修正后的译文，如原译文缺失则此处为翻译。
 - proofread_note：输出具体的修改原因（如：术语修正/语法优化/风格调整）。如果没有修改，请留空字符串。
 - new_terms: 仅当该块中出现明确"专有名词/术语/人名/地名"且不在术语表内时才输出；否则 []。
   new_terms 每项必须是：{{'term': '英文术语', 'translation': '中文译名', 'note': '可选备注'}}
+- 原文中的 [[HTML_TAG_XXXX]] 是不可变 HTML 标签占位符：必须保留每个 HTML_TAG 编号且顺序不变，不得翻译、删除、添加或改写。
 
 【输出格式】
 必须输出一个纯 JSON 列表，不要包含 Markdown 标记。
@@ -272,6 +277,7 @@ class Proofread1Workflow:
                     rate_limiter.acquire()
                 
                 # 发送请求
+                request_started = True
                 response = self.llm_engine.request_prompt(prompt=prompt, system_prompt=system_prompt)
                 
                 # 清理 markdown 标记
@@ -282,10 +288,11 @@ class Proofread1Workflow:
                 try:
                     result_data, parse_mode = parse_llm_rows(
                         json_str,
-                        [str(block.key) for block in batch],
+                        batch_context.aliases,
                         include_new_terms=True,
                         allow_merge=False,
                     )
+                    result_data = batch_context.restore_response_rows(result_data)
                     logger.info("一校响应解析成功，模式=%s", parse_mode)
                     
                     # 验证返回结果是否为列表
@@ -297,14 +304,14 @@ class Proofread1Workflow:
                         raise ValueError(f"返回的数组长度 ({len(result_data)}) 与请求片段数量 ({len(batch)}) 不匹配")
                     
                     # 验证 BLOCK_ID 是否匹配
-                    req_keys = [str(block.key) for block in batch]
+                    req_keys = batch_context.aliases
                     resp_keys = [str(item.get("BLOCK_ID")) for item in result_data]
                     if set(req_keys) != set(resp_keys):
                         raise ValueError(f"返回的 BLOCK_ID {resp_keys} 与请求 {req_keys} 不匹配")
                     
                     # 处理返回结果
                     # 创建块映射，方便查找
-                    block_map = {str(block.key): block for block in batch}
+                    block_map = batch_context.block_by_alias
                     
                     for item in result_data:
                         block_id = str(item.get("BLOCK_ID", "")).strip()
@@ -410,6 +417,9 @@ class Proofread1Workflow:
                     logger.warning(f"[Depth={depth}] 请求失败，准备进行第 {attempt+1} 次重试: {e}")
                 else:
                     logger.error(f"[Depth={depth}] 已达最大重试次数，当前批次失败: {e}")
+            finally:
+                if request_started and rate_limiter:
+                    rate_limiter.mark_response_processed()
         
         # 拆分阶段：只有当重试彻底失败才会走到这里
         if len(batch) > 1:

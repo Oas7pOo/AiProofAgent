@@ -11,6 +11,7 @@ from core.term_manager import TermManager
 from core.utils import match_terms_for_block, format_terms
 from models.term import TermEntry
 from models.document import TranslationBlock
+from utils.html_placeholders import build_batch_prompt_context
 from utils.llm_json_parser import LlmJsonParseError, parse_llm_rows
 from workflows.base_runner import BatchTaskRunner
 
@@ -126,7 +127,8 @@ class Proofread2Workflow:
 
         # 构建二校 prompt
         blocks = []
-        for b in batch:
+        batch_context = build_batch_prompt_context(batch)
+        for alias, b in batch_context.block_by_alias.items():
             # 为每个块单独匹配术语
             block_old_hits, block_new_hits = match_terms_for_block(b, self.old_terms, self.new_terms)
             
@@ -135,8 +137,8 @@ class Proofread2Workflow:
             block_new_terms_str = format_terms(block_new_hits)
             
             blocks.append(
-                f"--- BLOCK_ID: {b.key} ---\n"
-                f"原文: {b.en_block}\n"
+                f"--- BLOCK_ID: {alias} ---\n"
+                f"原文: {batch_context.source_by_alias[alias]}\n"
                 f"原译: {b.zh_block}\n"
                 f"一校译文: {b.proofread1_zh}\n"
                 f"一校建议: {b.proofread1_note}\n"
@@ -157,7 +159,9 @@ class Proofread2Workflow:
             "【输出要求】\n"
             "必须输出一个纯 JSON 列表，不要包含 Markdown。\n"
             "每个对象必须包含：BLOCK_ID / proofread_zh / proofread_note。\n"
-            "proofread_zh 必须给出\"最终二校译文\"（即使与一校相同也要完整输出，如原译文与一校缺失则此处为翻译）。HTML 标签中的引号冲突必须对内部的引号进行转义。如果分段奇怪则可以合并到前一段译文，此处留空。\n"
+            "BLOCK_ID 必须原样复制输入的短 ID，例如 BLOCK_001，不得改写。\n"
+            "proofread_zh 必须给出\"最终二校译文\"（即使与一校相同也要完整输出，如原译文与一校缺失则此处为翻译）。如果分段奇怪则可以合并到前一段译文，此处留空。\n"
+            "原文中的 [[HTML_TAG_XXXX]] 是不可变 HTML 标签占位符：必须保留每个 HTML_TAG 编号且顺序不变，不得翻译、删除、添加或改写。\n"
             "proofread_note 写修改原因及文中出现的术语；如果该段合并至前段，则在这里写出合并至前段。\n"
             "\n"
             "[\n"
@@ -166,10 +170,8 @@ class Proofread2Workflow:
         )
         return prompt
 
-    def request_llm(self, prompt: str, rate_limiter=None) -> str:
+    def request_llm(self, prompt: str) -> str:
         """向 LLM 发起请求并提取 JSON"""
-        if rate_limiter:
-            rate_limiter.acquire()
         system_prompt = "你是一个严谨的翻译校对助手。请只输出合法的 JSON 数组结构，不要包含 markdown 代码块标记。"
         resp = self.llm_engine.request_prompt(prompt, system_prompt=system_prompt)
         resp = re.sub(r'^```[jJ]son\s*', '', resp.strip())
@@ -179,19 +181,21 @@ class Proofread2Workflow:
     def parse_and_validate(self, batch: List[TranslationBlock], text: str) -> Tuple[bool, str, List[Dict]]:
         """校验返回的 JSON 是否格式完好且与原区块一一对应"""
         try:
+            batch_context = build_batch_prompt_context(batch)
             data, parse_mode = parse_llm_rows(
                 text,
-                [str(block.key) for block in batch],
+                batch_context.aliases,
                 include_new_terms=False,
                 allow_merge=False,
             )
+            data = batch_context.restore_response_rows(data)
             logger.info("二校响应解析成功，模式=%s", parse_mode)
             if not isinstance(data, list):
                 return False, "返回的结果不是 JSON 数组", []
             if len(data) != len(batch):
                 return False, f"返回的数组长度 ({len(data)}) 与请求片段数量 ({len(batch)}) 不匹配", []
 
-            req_keys = [str(b.key) for b in batch]
+            req_keys = batch_context.aliases
             resp_keys = [str(item.get("BLOCK_ID")) for item in data]
             if set(req_keys) != set(resp_keys):
                 return False, f"返回的 BLOCK_ID {resp_keys} 与请求 {req_keys} 不匹配", []
@@ -239,9 +243,10 @@ class Proofread2Workflow:
 
     def apply_batch(self, batch: List[TranslationBlock], data: List[Dict], save: bool = True):
         """将用户或 LLM 生成的校验数据应用到内存模型并持久化"""
+        batch_context = build_batch_prompt_context(batch)
         data_map = {str(item.get("BLOCK_ID")): item for item in data}
-        for b in batch:
-            res = data_map.get(str(b.key))
+        for alias, b in batch_context.block_by_alias.items():
+            res = data_map.get(alias)
             if res:
                 # 幂等性检查：如果块已经完成二校，则跳过
                 if b.stage >= 2:
@@ -323,13 +328,17 @@ class Proofread2Workflow:
         MAX_RETRIES = 3
         
         for attempt in range(MAX_RETRIES):
+            request_started = False
             try:
                 logger.info(f"[DEBUG] [Depth={depth}] 开始构建prompt")
                 prompt = self.build_prompt_for_batch(batch)
                 logger.info(f"[DEBUG] [Depth={depth}] prompt构建完成，长度={len(prompt)}")
                 
                 logger.info(f"[DEBUG] [Depth={depth}] 开始request_llm")
-                response = self.request_llm(prompt, rate_limiter=rate_limiter)
+                if rate_limiter:
+                    rate_limiter.acquire()
+                request_started = True
+                response = self.request_llm(prompt)
                 logger.info(f"[DEBUG] [Depth={depth}] request_llm完成，响应长度={len(response)}")
                 
                 logger.info(f"[DEBUG] [Depth={depth}] 开始parse_and_validate")
@@ -354,6 +363,9 @@ class Proofread2Workflow:
                     logger.warning(f"[Depth={depth}] 二校请求失败，准备进行第 {attempt+1} 次重试: {e}")
                 else:
                     logger.error(f"[Depth={depth}] 二校重试失败: {e}")
+            finally:
+                if request_started and rate_limiter:
+                    rate_limiter.mark_response_processed()
         
         # 拆分阶段：只有当重试彻底失败才会走到这里
         if len(batch) > 1:

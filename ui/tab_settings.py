@@ -29,7 +29,7 @@ class SettingsTab(ttk.Frame):
         add_row(grp_run, "最大并发:", "llm.ai_max_workers", 0) # 将LLM并发移到LLM配置下
         add_row(grp_run, "每批数量:", "llm.max_blocks", 1)   # 将LLM批次数量移到LLM配置下
         add_row(grp_run, "单批最大字数:", "llm.max_chars", 2) # 将LLM单批最大字数移到LLM配置下
-        add_row(grp_run, "重试等待(秒):", "llm.time_wait", 3) # 将LLM重试等待移到LLM配置下
+        add_row(grp_run, "请求间隔/随机等待上限(秒):", "llm.time_wait", 3)
         add_row(grp_run, "超时时间(秒):", "llm.timeout", 4)  # 将LLM超时时间移到LLM配置下
 
         grp_ocr = ttk.LabelFrame(self, text="OCR 设置")
